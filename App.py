@@ -2,13 +2,20 @@ import os
 import uuid
 import asyncio
 import gradio as gr
+import logging
+import traceback
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor, Gemma3ForConditionalGeneration
 from typing import List, Dict, Any
 
-# Use HF Token from environment variable
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Use HF Token from environment variable with better error handling
 HF_TOKEN = os.getenv('HF_TOKEN')
 if not HF_TOKEN:
-    raise ValueError("HF_TOKEN environment variable not set. Please set your Hugging Face token.")
+    logger.error("HF_TOKEN environment variable not set! Attempting to use Hugging Face credentials from cache.")
+    # Instead of raising an error, we'll try to proceed and let the HF library use cached credentials
 
 class PolyThinkAgent:
     def __init__(self, model_name: str, model_path: str, is_gemma3: bool = False):
@@ -20,30 +27,40 @@ class PolyThinkAgent:
         self.is_gemma3 = is_gemma3
         
         try:
+            logger.info(f"Loading model: {model_name} from {model_path}")
+            
+            # Prepare token parameter
+            token_param = {"token": HF_TOKEN} if HF_TOKEN else {}
+            
             if is_gemma3:
                 # Special handling for Gemma 3 models
                 self.processor = AutoProcessor.from_pretrained(
                     model_path,
-                    token=HF_TOKEN
+                    **token_param
                 )
                 self.model = Gemma3ForConditionalGeneration.from_pretrained(
                     model_path,
-                    token=HF_TOKEN,
-                    device_map="auto"
+                    device_map="auto",
+                    **token_param
                 ).eval()
                 self.tokenizer = self.processor.tokenizer
+                logger.info(f"Successfully loaded Gemma3 model: {model_name}")
             else:
                 # Standard handling for other models
                 self.tokenizer = AutoTokenizer.from_pretrained(
                     model_path,
-                    token=HF_TOKEN
+                    **token_param
                 )
                 self.model = AutoModelForCausalLM.from_pretrained(
                     model_path,
-                    token=HF_TOKEN
+                    **token_param
                 )
+                logger.info(f"Successfully loaded standard model: {model_name}")
         except Exception as e:
+            logger.error(f"Error loading model {model_name}: {str(e)}")
             print(f"Error loading model {model_name}: {str(e)}")
+            print("Stack trace:")
+            traceback.print_exc()
             raise
         
         # Agent-specific configuration
