@@ -38,7 +38,7 @@ class PolyThinkAgent:
         Assign a unique problem-solving specialization to the agent
         """
         specialization_map = {
-            "Gemma 2b": "Analytical Problem Solving",
+            "Gemma 2 2b": "Analytical Problem Solving",
             "Llama 3.2 1b": "Creative Solution Generation",
             "DeepSeek R1 1.5B": "Consensus and Reasoning"
         }
@@ -102,7 +102,7 @@ class PolyThinkAgentOrchestrator:
         Initialize multi-agent problem-solving system
         """
         self.agents = [
-            PolyThinkAgent("Gemma 2b", "google/gemma-2b"),  # Corrected model path
+            PolyThinkAgent("Gemma 2 2b", "google/gemma-2-2b"),  # Corrected model path
             PolyThinkAgent("Llama 3.2 1b", "meta-ai/llama-3.2-1b"),  # Updated path format
             PolyThinkAgent("DeepSeek R1 1.5B", "deepseek-ai/deepseek-coder-1.5b-base")
         ]
@@ -156,7 +156,7 @@ def create_advanced_polythink_interface():
         
         with gr.Accordion("Agent Solutions", open=True):
             with gr.Row():
-                gemma_output = gr.Textbox(label="Gemma 2b Solution", interactive=False)
+                gemma_output = gr.Textbox(label="Gemma 2 2b Solution", interactive=False)
                 llama_output = gr.Textbox(label="Llama 3.2 1b Solution", interactive=False)
                 deepseek_output = gr.Textbox(label="DeepSeek Consensus", interactive=False)
             
