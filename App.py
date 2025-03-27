@@ -1,18 +1,11 @@
 import os
-import gradio as gr
-import torch
-from huggingface_hub import login
+import uuid
+import asyncio
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from typing import List, Dict, Any
-import asyncio
-import uuid
 
 # Use HF Token from environment variable
 HF_TOKEN = os.getenv('HF_TOKEN')
-
-# Login to Hugging Face
-if HF_TOKEN:
-    login(token=HF_TOKEN)
 
 class PolyThinkAgent:
     def __init__(self, model_name: str, model_path: str):
@@ -25,11 +18,13 @@ class PolyThinkAgent:
         # Use token for authentication
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_path, 
-            token=HF_TOKEN
+            token=HF_TOKEN,
+            use_auth_token=True
         )
         self.model = AutoModelForCausalLM.from_pretrained(
             model_path, 
-            token=HF_TOKEN
+            token=HF_TOKEN,
+            use_auth_token=True
         )
         
         # Agent-specific configuration
