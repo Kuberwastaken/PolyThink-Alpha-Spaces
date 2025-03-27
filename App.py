@@ -2,30 +2,46 @@ import os
 import uuid
 import asyncio
 import gradio as gr
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor, Gemma3ForConditionalGeneration
 from typing import List, Dict, Any
 
 # Use HF Token from environment variable
 HF_TOKEN = os.getenv('HF_TOKEN')
+if not HF_TOKEN:
+    raise ValueError("HF_TOKEN environment variable not set. Please set your Hugging Face token.")
 
 class PolyThinkAgent:
-    def __init__(self, model_name: str, model_path: str):
+    def __init__(self, model_name: str, model_path: str, is_gemma3: bool = False):
         """
         Initialize an agent with specific model capabilities
         """
         self.id = str(uuid.uuid4())
         self.model_name = model_name
+        self.is_gemma3 = is_gemma3
         
         try:
-            # Use only token parameter as use_auth_token is deprecated
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                model_path,
-                token=HF_TOKEN
-            )
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_path,
-                token=HF_TOKEN
-            )
+            if is_gemma3:
+                # Special handling for Gemma 3 models
+                self.processor = AutoProcessor.from_pretrained(
+                    model_path,
+                    token=HF_TOKEN
+                )
+                self.model = Gemma3ForConditionalGeneration.from_pretrained(
+                    model_path,
+                    token=HF_TOKEN,
+                    device_map="auto"
+                ).eval()
+                self.tokenizer = self.processor.tokenizer
+            else:
+                # Standard handling for other models
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    model_path,
+                    token=HF_TOKEN
+                )
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_path,
+                    token=HF_TOKEN
+                )
         except Exception as e:
             print(f"Error loading model {model_name}: {str(e)}")
             raise
@@ -38,7 +54,7 @@ class PolyThinkAgent:
         Assign a unique problem-solving specialization to the agent
         """
         specialization_map = {
-            "Gemma 2 2b": "Analytical Problem Solving",
+            "Gemma 3 4b-it": "Advanced Analytical Problem Solving",
             "Llama 3.2 1b": "Creative Solution Generation",
             "DeepSeek R1 1.5B": "Consensus and Reasoning"
         }
@@ -52,9 +68,27 @@ class PolyThinkAgent:
         prompt = self._construct_prompt(problem, context)
         
         # Generate solution
-        inputs = self.tokenizer(prompt, return_tensors="pt")
-        outputs = self.model.generate(**inputs, max_length=500, num_return_sequences=1)
-        solution = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        if self.is_gemma3:
+            # Gemma 3 specific processing
+            messages = [
+                {
+                    "role": "system",
+                    "content": [{"type": "text", "text": f"You are a specialized problem solver with expertise in {self.specialization}."}]
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": prompt}]
+                }
+            ]
+            
+            inputs = self.processor(messages, return_tensors="pt").to(self.model.device)
+            outputs = self.model.generate(**inputs, max_new_tokens=500)
+            solution = self.processor.decode(outputs[0], skip_special_tokens=True)
+        else:
+            # Standard processing for other models
+            inputs = self.tokenizer(prompt, return_tensors="pt")
+            outputs = self.model.generate(**inputs, max_length=500, num_return_sequences=1)
+            solution = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
         
         return {
             "agent_id": self.id,
@@ -102,8 +136,8 @@ class PolyThinkAgentOrchestrator:
         Initialize multi-agent problem-solving system
         """
         self.agents = [
-            PolyThinkAgent("Gemma 2 2b", "google/gemma-2-2b"),  # Corrected model path
-            PolyThinkAgent("Llama 3.2 1b", "meta-ai/llama-3.2-1b"),  # Updated path format
+            PolyThinkAgent("Gemma 3 4b-it", "google/gemma-3-4b-it", is_gemma3=True),  # Updated to Gemma 3
+            PolyThinkAgent("Llama 3.2 1b", "meta-ai/llama-3.2-1b"),
             PolyThinkAgent("DeepSeek R1 1.5B", "deepseek-ai/deepseek-coder-1.5b-base")
         ]
     
@@ -156,7 +190,7 @@ def create_advanced_polythink_interface():
         
         with gr.Accordion("Agent Solutions", open=True):
             with gr.Row():
-                gemma_output = gr.Textbox(label="Gemma 2 2b Solution", interactive=False)
+                gemma_output = gr.Textbox(label="Gemma 3 4b-it Solution", interactive=False)  # Updated label
                 llama_output = gr.Textbox(label="Llama 3.2 1b Solution", interactive=False)
                 deepseek_output = gr.Textbox(label="DeepSeek Consensus", interactive=False)
             
