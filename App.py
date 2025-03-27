@@ -101,7 +101,7 @@ class PolyThinkAgentOrchestrator:
         Initialize multi-agent problem-solving system
         """
         self.agents = [
-            PolyThinkAgent("Gemma 2b", "google/gemma-2b"),
+            PolyThinkAgent("Gemma 2b", "google/gemma-2-2b"),
             PolyThinkAgent("Llama 3.2 1b", "meta-llama/Llama-3.2-1b"),
             PolyThinkAgent("DeepSeek R1 1.5B", "deepseek-ai/deepseek-coder-1.5b-base")
         ]
