@@ -1,0 +1,12 @@
+gradio
+torch
+transformers
+accelerate
+sentencepiece
+protobuf
+asyncio
+typing
+uuid
+numpy
+scipy
+tensorboard
