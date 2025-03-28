@@ -5,6 +5,7 @@ import gradio as gr
 import logging
 import traceback
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from huggingface_hub import login
 from typing import List, Dict, Any
 
 # Configure logging
@@ -24,11 +25,19 @@ class PolyThinkAgent:
         self.id = str(uuid.uuid4())
         self.model_name = model_name
         
+        # Explicitly handle Hugging Face login
+        HF_TOKEN = os.getenv('HF_TOKEN')
+        if not HF_TOKEN:
+            raise ValueError("HF_TOKEN environment variable must be set for accessing gated models!")
+        
         try:
+            # Explicit login before model loading
+            login(token=HF_TOKEN)
+            
             logger.info(f"Loading model: {model_name} from {model_path}")
             
-            # Prepare token parameter
-            token_param = {"token": HF_TOKEN} if HF_TOKEN else {}
+            # Token parameter for all model and tokenizer loading
+            token_param = {"token": HF_TOKEN, "use_auth_token": HF_TOKEN}
             
             # Standard handling for models
             self.tokenizer = AutoTokenizer.from_pretrained(
