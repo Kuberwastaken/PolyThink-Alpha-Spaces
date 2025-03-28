@@ -137,7 +137,7 @@ class PolyThinkAgentOrchestrator:
         self.agents = [
             PolyThinkAgent("Phi-2", "microsoft/phi-2"),
             PolyThinkAgent("Llama 3.2 1b", "meta-llama/llama-3.2-1b"),
-            PolyThinkAgent("DeepSeek R1 1.5B", "deepseek-ai/deepseek-coder-1.5b-base")
+            PolyThinkAgent("DeepSeek R1 1.5B", "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
         ]
     
     async def solve_problem_multi_agent(self, problem: str) -> Dict[str, Any]:
