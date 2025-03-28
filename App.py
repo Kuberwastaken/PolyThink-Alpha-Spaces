@@ -4,18 +4,19 @@ import asyncio
 import gradio as gr
 import logging
 import traceback
+import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from huggingface_hub import login
 from typing import List, Dict, Any
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Use HF Token from environment variable with better error handling
-HF_TOKEN = os.getenv('HF_TOKEN')
-if not HF_TOKEN:
-    logger.error("HF_TOKEN environment variable not set! Attempting to use Hugging Face credentials from cache.")
+# Get device information
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+logger.info(f"Using device: {DEVICE}")
 
 class PolyThinkAgent:
     def __init__(self, model_name: str, model_path: str):
@@ -25,31 +26,36 @@ class PolyThinkAgent:
         self.id = str(uuid.uuid4())
         self.model_name = model_name
         
-        # Explicitly handle Hugging Face login
-        HF_TOKEN = os.getenv('HF_TOKEN')
-        if not HF_TOKEN:
-            raise ValueError("HF_TOKEN environment variable must be set for accessing gated models!")
+        # Get HF token from environment
+        self.hf_token = os.getenv("HF_TOKEN")
+        if not self.hf_token:
+            logger.error("HF_TOKEN environment variable is not set!")
+            raise ValueError("HF_TOKEN environment variable is not set!")
         
         try:
             # Explicit login before model loading
-            login(token=HF_TOKEN)
+            login(token=self.hf_token)
+            logger.info(f"Successfully logged in to Hugging Face Hub")
             
-            logger.info(f"Loading model: {model_name} from {model_path}")
-            
-            # Token parameter for all model and tokenizer loading
-            token_param = {"token": HF_TOKEN, "use_auth_token": HF_TOKEN}
+            logger.info(f"Loading model: {model_name} from {model_path} on {DEVICE}")
+            print(f"Time: {datetime.now()} - Loading model: {model_name}")
             
             # Standard handling for models
             self.tokenizer = AutoTokenizer.from_pretrained(
                 model_path,
-                **token_param
+                token=self.hf_token,
+                use_fast=True
             )
+            
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_path,
-                device_map="auto",
-                **token_param
+                token=self.hf_token,
+                torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32,
+                device_map="auto"
             )
+            
             logger.info(f"Successfully loaded model: {model_name}")
+            print(f"Time: {datetime.now()} - Successfully loaded model: {model_name}")
         except Exception as e:
             logger.error(f"Error loading model {model_name}: {str(e)}")
             print(f"Error loading model {model_name}: {str(e)}")
