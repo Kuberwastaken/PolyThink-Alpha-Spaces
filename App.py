@@ -4,7 +4,7 @@ import asyncio
 import gradio as gr
 import logging
 import traceback
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor, Gemma3ForConditionalGeneration
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from typing import List, Dict, Any
 
 # Configure logging
@@ -15,16 +15,14 @@ logger = logging.getLogger(__name__)
 HF_TOKEN = os.getenv('HF_TOKEN')
 if not HF_TOKEN:
     logger.error("HF_TOKEN environment variable not set! Attempting to use Hugging Face credentials from cache.")
-    # Instead of raising an error, we'll try to proceed and let the HF library use cached credentials
 
 class PolyThinkAgent:
-    def __init__(self, model_name: str, model_path: str, is_gemma3: bool = False):
+    def __init__(self, model_name: str, model_path: str):
         """
         Initialize an agent with specific model capabilities
         """
         self.id = str(uuid.uuid4())
         self.model_name = model_name
-        self.is_gemma3 = is_gemma3
         
         try:
             logger.info(f"Loading model: {model_name} from {model_path}")
@@ -32,30 +30,17 @@ class PolyThinkAgent:
             # Prepare token parameter
             token_param = {"token": HF_TOKEN} if HF_TOKEN else {}
             
-            if is_gemma3:
-                # Special handling for Gemma 3 models
-                self.processor = AutoProcessor.from_pretrained(
-                    model_path,
-                    **token_param
-                )
-                self.model = Gemma3ForConditionalGeneration.from_pretrained(
-                    model_path,
-                    device_map="auto",
-                    **token_param
-                ).eval()
-                self.tokenizer = self.processor.tokenizer
-                logger.info(f"Successfully loaded Gemma3 model: {model_name}")
-            else:
-                # Standard handling for other models
-                self.tokenizer = AutoTokenizer.from_pretrained(
-                    model_path,
-                    **token_param
-                )
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    model_path,
-                    **token_param
-                )
-                logger.info(f"Successfully loaded standard model: {model_name}")
+            # Standard handling for models
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_path,
+                **token_param
+            )
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                device_map="auto",
+                **token_param
+            )
+            logger.info(f"Successfully loaded model: {model_name}")
         except Exception as e:
             logger.error(f"Error loading model {model_name}: {str(e)}")
             print(f"Error loading model {model_name}: {str(e)}")
@@ -71,7 +56,7 @@ class PolyThinkAgent:
         Assign a unique problem-solving specialization to the agent
         """
         specialization_map = {
-            "Gemma 3 4b-it": "Advanced Analytical Problem Solving",
+            "Phi-2": "Advanced Analytical Problem Solving",
             "Llama 3.2 1b": "Creative Solution Generation",
             "DeepSeek R1 1.5B": "Consensus and Reasoning"
         }
@@ -85,27 +70,9 @@ class PolyThinkAgent:
         prompt = self._construct_prompt(problem, context)
         
         # Generate solution
-        if self.is_gemma3:
-            # Gemma 3 specific processing
-            messages = [
-                {
-                    "role": "system",
-                    "content": [{"type": "text", "text": f"You are a specialized problem solver with expertise in {self.specialization}."}]
-                },
-                {
-                    "role": "user",
-                    "content": [{"type": "text", "text": prompt}]
-                }
-            ]
-            
-            inputs = self.processor(messages, return_tensors="pt").to(self.model.device)
-            outputs = self.model.generate(**inputs, max_new_tokens=500)
-            solution = self.processor.decode(outputs[0], skip_special_tokens=True)
-        else:
-            # Standard processing for other models
-            inputs = self.tokenizer(prompt, return_tensors="pt")
-            outputs = self.model.generate(**inputs, max_length=500, num_return_sequences=1)
-            solution = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        inputs = self.tokenizer(prompt, return_tensors="pt")
+        outputs = self.model.generate(**inputs, max_length=500, num_return_sequences=1)
+        solution = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
         
         return {
             "agent_id": self.id,
@@ -153,7 +120,7 @@ class PolyThinkAgentOrchestrator:
         Initialize multi-agent problem-solving system
         """
         self.agents = [
-            PolyThinkAgent("Gemma 3 4b-it", "google/gemma-3-4b-it", is_gemma3=True),  # Updated to Gemma 3
+            PolyThinkAgent("Phi-2", "microsoft/phi-2"),
             PolyThinkAgent("Llama 3.2 1b", "meta-ai/llama-3.2-1b"),
             PolyThinkAgent("DeepSeek R1 1.5B", "deepseek-ai/deepseek-coder-1.5b-base")
         ]
@@ -192,7 +159,7 @@ def create_advanced_polythink_interface():
     def solve_problem(problem):
         return asyncio.run(orchestrator.solve_problem_multi_agent(problem))
     
-    interface = gr.Blocks(theme=gr.themes.Default())  # Changed to Default theme for better visibility
+    interface = gr.Blocks(theme=gr.themes.Default())
     
     with interface:
         gr.Markdown("# PolyThink: Multi-Agent Intelligent Problem Solver")
@@ -207,14 +174,14 @@ def create_advanced_polythink_interface():
         
         with gr.Accordion("Agent Solutions", open=True):
             with gr.Row():
-                gemma_output = gr.Textbox(label="Gemma 3 4b-it Solution", interactive=False)  # Updated label
+                phi2_output = gr.Textbox(label="Phi-2 Solution", interactive=False)
                 llama_output = gr.Textbox(label="Llama 3.2 1b Solution", interactive=False)
-                deepseek_output = gr.Textbox(label="DeepSeek Consensus", interactive=False)
+                deepseek_output = gr.Textbox(label="DeepSeek Solution", interactive=False)
             
             with gr.Row():
-                gemma_confidence = gr.Slider(
+                phi2_confidence = gr.Slider(
                     minimum=0, maximum=100,
-                    label="Gemma Confidence",
+                    label="Phi-2 Confidence",
                     interactive=False
                 )
                 llama_confidence = gr.Slider(
@@ -239,16 +206,16 @@ def create_advanced_polythink_interface():
         def process_problem(problem):
             result = solve_problem(problem)
             
-            gemma_sol = result['individual_solutions'][0]
+            phi2_sol = result['individual_solutions'][0]
             llama_sol = result['individual_solutions'][1]
-            deepseek_sol = result['individual_solutions'][2]  # Added missing DeepSeek solution
+            deepseek_sol = result['individual_solutions'][2]
             consensus = result['consensus']
             
             return [
-                gemma_sol['solution'],
+                phi2_sol['solution'],
                 llama_sol['solution'],
-                deepseek_sol['solution'],  # Updated to use DeepSeek instead of consensus
-                gemma_sol['confidence'],
+                deepseek_sol['solution'],
+                phi2_sol['confidence'],
                 llama_sol['confidence'],
                 consensus['consensus_confidence']
             ]
@@ -257,10 +224,10 @@ def create_advanced_polythink_interface():
             process_problem,
             inputs=problem_input,
             outputs=[
-                gemma_output,
+                phi2_output,
                 llama_output,
                 deepseek_output,
-                gemma_confidence,
+                phi2_confidence,
                 llama_confidence,
                 consensus_confidence
             ]
