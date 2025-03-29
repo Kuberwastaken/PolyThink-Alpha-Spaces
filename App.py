@@ -417,14 +417,13 @@ def create_advanced_polythink_interface():
         margin: 0 auto;
     }
     .status-bar {
-        background-color: #0f0f11;
+        background-color: #27272a;
         border-radius: 10px;
         padding: 15px;
         margin: 10px 0;
         border-left: 5px solid #4682b4;
         font-size: 18px;
         font-weight: bold;
-        text-align: center; /* Center the text in the status bar */
     }
     .round-indicator {
         background-color: #e6f7ff;
@@ -458,14 +457,14 @@ def create_advanced_polythink_interface():
         border-radius: 8px;
         padding: 15px;
         margin-bottom: 15px;
-        background-color: #f0f5ff;
+        background-color: #0f0f11;
     }
     .final-report {
         border: 2px solid #722ed1;
         border-radius: 8px;
         padding: 20px;
         margin: 20px 0;
-        background-color: #f9f0ff;
+        background-color: #0f0f11;
     }
     """
     
