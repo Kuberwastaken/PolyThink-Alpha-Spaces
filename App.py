@@ -405,14 +405,13 @@ def create_advanced_polythink_interface():
     current_solutions = None
     current_judgment = None
     
-    # Step 1: Get solver solutions, then automatically get judgment
-    def get_solutions_and_judge(problem):
-        global current_problem, current_solutions, current_judgment
+    # Step 1: Get solver solutions only
+    def get_solver_solutions(problem):
+        global current_problem, current_solutions
         
         # Reset state
         current_problem = problem
         current_solutions = None
-        current_judgment = None
         
         # Get solutions
         current_solutions = asyncio.run(orchestrator.get_solver_solutions(problem))
@@ -421,35 +420,62 @@ def create_advanced_polythink_interface():
         phi2_sol = next((s for s in current_solutions if s['model_name'] == "Phi-2"), None)
         llama_sol = next((s for s in current_solutions if s['model_name'] == "Llama 3.2 1b"), None)
         
-        # Automatically get judgment
-        current_judgment = asyncio.run(orchestrator.get_judge_evaluation(problem, current_solutions))
-        
-        # Check if reprompt is needed
-        reprompt_needed = current_judgment.get('reprompt_needed', False)
-        
-        # If reprompt is needed, automatically get revised solutions
-        if reprompt_needed:
-            revised_solutions = asyncio.run(orchestrator.get_revised_solutions(
-                problem, current_solutions, current_judgment
-            ))
-            
-            # Update the current solutions with revised ones
-            current_solutions = revised_solutions
-            
-            # Get updated phi2 and llama solutions
-            phi2_sol = next((s for s in current_solutions if s['model_name'] == "Phi-2"), None)
-            llama_sol = next((s for s in current_solutions if s['model_name'] == "Llama 3.2 1b"), None)
-        
-        # Return all results
+        # Return solutions and make judge button visible
         return [
             phi2_sol['solution'] if phi2_sol else "Error retrieving solution",
             llama_sol['solution'] if llama_sol else "Error retrieving solution",
             phi2_sol['confidence'] if phi2_sol else 0,
             llama_sol['confidence'] if llama_sol else 0,
+            gr.update(visible=True),  # Show judge button
+            gr.update(value="Waiting for judge evaluation..."),  # Clear judgment text
+            gr.update(value=""),  # Clear winner text
+            gr.update(value="")   # Clear recommendations text
+        ]
+    
+    # Step 2: Get judge evaluation
+    def get_judge_evaluation():
+        global current_problem, current_solutions, current_judgment
+        
+        if not current_problem or not current_solutions:
+            return ["No problem or solutions available", "", "", gr.update(visible=False)]
+        
+        # Get judgment
+        current_judgment = asyncio.run(orchestrator.get_judge_evaluation(current_problem, current_solutions))
+        
+        # Check if reprompt is needed
+        reprompt_needed = current_judgment.get('reprompt_needed', False)
+        
+        return [
             current_judgment['judgment'],
             current_judgment.get('winner', "No clear winner"),
             current_judgment.get('recommendations', "No specific recommendations"),
-            gr.update(visible=False)  # Hide judge button since it's automatic
+            gr.update(visible=reprompt_needed)  # Show reprompt button only if needed
+        ]
+    
+    # Step 3: Get revised solutions if needed
+    def get_revised_solutions():
+        global current_problem, current_solutions, current_judgment
+        
+        if not current_problem or not current_solutions or not current_judgment:
+            return ["No problem, solutions or judgment available", "No solutions available", 0, 0]
+        
+        # Get revised solutions
+        revised_solutions = asyncio.run(orchestrator.get_revised_solutions(
+            current_problem, current_solutions, current_judgment
+        ))
+        
+        # Update the current solutions with revised ones
+        current_solutions = revised_solutions
+        
+        # Get updated phi2 and llama solutions
+        phi2_sol = next((s for s in current_solutions if s['model_name'] == "Phi-2"), None)
+        llama_sol = next((s for s in current_solutions if s['model_name'] == "Llama 3.2 1b"), None)
+        
+        return [
+            phi2_sol['solution'] if phi2_sol else "Error retrieving solution",
+            llama_sol['solution'] if llama_sol else "Error retrieving solution",
+            phi2_sol['confidence'] if phi2_sol else 0,
+            llama_sol['confidence'] if llama_sol else 0
         ]
     
     # Create the interface
@@ -463,7 +489,7 @@ def create_advanced_polythink_interface():
                 placeholder="Enter a problem or question here...",
                 lines=3
             )
-            solve_button = gr.Button("Solve Problem")
+            solve_button = gr.Button("Solve Problem", variant="primary")
         
         with gr.Row():
             with gr.Column():
@@ -479,20 +505,58 @@ def create_advanced_polythink_interface():
         with gr.Row():
             with gr.Column():
                 gr.Markdown("### Judge Evaluation")
-                judgment_text = gr.Textbox(label="Judgment", lines=10)
+                judge_button = gr.Button("Get Judge Evaluation", visible=False, variant="secondary")
+                judgment_text = gr.Textbox(label="Judgment", lines=10, value="Judge will evaluate solutions after you click the button above.")
                 winner_text = gr.Textbox(label="Winner")
                 recommendations_text = gr.Textbox(label="Recommendations", lines=3)
+                reprompt_button = gr.Button("Get Revised Solutions", visible=False)
+        
+        # Status indicator
+        status_text = gr.Markdown("### Status: Ready")
         
         # Connect the components
         solve_button.click(
-            fn=get_solutions_and_judge,
+            fn=lambda: "### Status: Generating solutions from Phi-2 and Llama 3.2...",
+            outputs=[status_text],
+            queue=False
+        ).then(
+            fn=get_solver_solutions,
             inputs=[problem_input],
             outputs=[
                 phi2_solution, llama_solution, 
                 phi2_confidence, llama_confidence,
-                judgment_text, winner_text, recommendations_text,
-                solve_button  # This is just a placeholder, we'll update visibility
+                judge_button, judgment_text, winner_text, recommendations_text
             ]
+        ).then(
+            fn=lambda: "### Status: Solutions generated! Click 'Get Judge Evaluation' to continue.",
+            outputs=[status_text],
+            queue=False
+        )
+        
+        judge_button.click(
+            fn=lambda: "### Status: Judge (DeepSeek) is evaluating solutions...",
+            outputs=[status_text],
+            queue=False
+        ).then(
+            fn=get_judge_evaluation,
+            outputs=[judgment_text, winner_text, recommendations_text, reprompt_button]
+        ).then(
+            fn=lambda: "### Status: Judge evaluation complete!",
+            outputs=[status_text],
+            queue=False
+        )
+        
+        reprompt_button.click(
+            fn=lambda: "### Status: Getting revised solutions based on judge feedback...",
+            outputs=[status_text],
+            queue=False
+        ).then(
+            fn=get_revised_solutions,
+            outputs=[phi2_solution, llama_solution, phi2_confidence, llama_confidence]
+        ).then(
+            fn=lambda: "### Status: Revised solutions generated!",
+            outputs=[status_text],
+            queue=False
         )
         
     return demo
