@@ -116,11 +116,21 @@ class PolyThinkAgent:
         )
         solution = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
         
-        # Extract the actual solution part
+        # Extract the actual solution part, ensuring we don't include the prompt
         if "SOLUTION:" in solution:
-            solution_text = solution.split("SOLUTION:")[1].strip()
+            solution_parts = solution.split("SOLUTION:")
+            # Take the last part after "SOLUTION:" to avoid including any prompt text
+            solution_text = solution_parts[-1].strip()
         else:
-            solution_text = solution.strip()
+            # Remove the prompt from the solution
+            prompt_text = prompt.strip()
+            if solution.startswith(prompt_text):
+                solution_text = solution[len(prompt_text):].strip()
+            else:
+                solution_text = solution.strip()
+        
+        # Clean up repeating patterns (especially for Llama)
+        solution_text = self._clean_repetition(solution_text)
         
         return {
             "agent_id": self.id,
@@ -129,6 +139,37 @@ class PolyThinkAgent:
             "solution": solution_text,
             "confidence": self._calculate_confidence(solution_text)
         }
+    
+    def _clean_repetition(self, text: str) -> str:
+        """
+        Clean up repetitive patterns in the generated text
+        """
+        # Split by lines and remove duplicates while preserving order
+        lines = text.split('\n')
+        seen = set()
+        unique_lines = []
+        for line in lines:
+            line_stripped = line.strip()
+            if line_stripped and line_stripped not in seen:
+                seen.add(line_stripped)
+                unique_lines.append(line)
+        
+        # Check for repeating patterns within the text
+        cleaned_text = '\n'.join(unique_lines)
+        
+        # Handle specific patterns like "5+10 = 15" repeated
+        if "=" in cleaned_text:
+            equations = cleaned_text.split('\n')
+            unique_equations = []
+            eq_seen = set()
+            for eq in equations:
+                eq_stripped = eq.strip()
+                if eq_stripped and eq_stripped not in eq_seen:
+                    eq_seen.add(eq_stripped)
+                    unique_equations.append(eq)
+            cleaned_text = '\n'.join(unique_equations)
+        
+        return cleaned_text
     
     async def evaluate_solutions(self, problem: str, solutions: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
@@ -186,11 +227,21 @@ class PolyThinkAgent:
         )
         solution = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
         
-        # Extract the revised solution part
+        # Extract the revised solution part, ensuring we don't include the prompt
         if "REVISED SOLUTION:" in solution:
-            revised = solution.split("REVISED SOLUTION:")[1].strip()
+            solution_parts = solution.split("REVISED SOLUTION:")
+            # Take the last part after "REVISED SOLUTION:" to avoid including any prompt text
+            revised = solution_parts[-1].strip()
         else:
-            revised = solution.strip()
+            # Remove the prompt from the solution
+            prompt_text = prompt.strip()
+            if solution.startswith(prompt_text):
+                revised = solution[len(prompt_text):].strip()
+            else:
+                revised = solution.strip()
+        
+        # Clean up repeating patterns
+        revised = self._clean_repetition(revised)
         
         return {
             "agent_id": self.id,
@@ -205,60 +256,43 @@ class PolyThinkAgent:
         """
         Create a specialized prompt for solver agents
         """
-        base_prompt = f"""
-        PROBLEM-SOLVING TASK
-        
-        PROBLEM: {problem}
-        
-        SOLUTION GUIDELINES:
-        - Start with the direct answer in one sentence
-        - Provide only essential reasoning (2-3 sentences maximum)
-        - For simple math problems, just show the calculation and result
-        - For complex problems, use brief step-by-step reasoning
-        - Total response should be under 75 words
-        
-        SOLUTION:
-        """
-        
-        # Add model-specific instructions
+        # Use different prompts for different models to better match their capabilities
         if "Llama" in self.model_name:
-            # Llama tends to be too brief, encourage slightly more explanation
-            return base_prompt
+            # Llama-specific prompt (simpler, more direct)
+            return f"""Answer the following problem concisely.
+Problem: {problem}
+Provide a short, clear answer with minimal explanation.
+Answer:"""
         else:
-            # Phi tends to be verbose, encourage brevity
-            return base_prompt + "\nIMPORTANT: Be extremely concise. Avoid unnecessary steps or explanations."
+            # Phi-2 specific prompt
+            return f"""Answer this problem:
+{problem}
+Your answer should be:
+1. Start with the direct answer
+2. Include only essential reasoning
+3. Be under 50 words total
+Answer:"""
     
     def _construct_judge_prompt(self, problem: str, solutions: List[Dict[str, Any]]) -> str:
         """
         Create a specialized prompt for judge agents
         """
-        prompt = f"""
-        SOLUTION EVALUATION TASK
-        
-        PROBLEM: {problem}
-        
-        You are the judge evaluating solutions from different problem-solving agents. 
-        Review each solution carefully and determine which one is best.
-        
-        SOLUTIONS TO EVALUATE:
-        """
-        
-        for i, sol in enumerate(solutions):
-            prompt += f"""
-        SOLUTION {i+1} from {sol['model_name']} ({sol['specialization']}):
-        {sol['solution']}
-        """
-        
-        prompt += f"""
-        EVALUATION INSTRUCTIONS:
-        1. Analyze each solution for correctness, clarity, and completeness
-        2. Identify the strengths and weaknesses of each approach
-        3. Select the best solution and explicitly name the winner (Phi-2 or Llama 3.2)
-        4. Determine if the solutions significantly disagree on the core answer. If they do, mark "REPROMPT: YES"
-        5. If reprompt is needed, explain specifically what the agents should focus on in their revised solutions
-        
-        YOUR EVALUATION:
-        """
+        prompt = f"""You are evaluating solutions to this problem: {problem}
+
+Solution from {solutions[0]['model_name']}:
+{solutions[0]['solution']}
+
+Solution from {solutions[1]['model_name']}:
+{solutions[1]['solution']}
+
+Analyze both solutions carefully. Determine which solution is better and explain why.
+First, state if the solutions are correct or incorrect.
+Then, select a winner (either {solutions[0]['model_name']} or {solutions[1]['model_name']}).
+Finally, provide recommendations for improvement.
+
+If the solutions significantly disagree, note "REPROMPT: YES" at the end.
+
+Your evaluation:"""
         
         return prompt
     
@@ -269,31 +303,19 @@ class PolyThinkAgent:
         # Find other solutions (not from this agent)
         other_solutions = [s for s in solutions if s['agent_id'] != self.id]
         
-        prompt = f"""
-        PROBLEM RE-EVALUATION TASK
-        
-        PROBLEM: {problem}
-        
-        Your previous solution:
-        {next((s['solution'] for s in solutions if s['agent_id'] == self.id), "No previous solution found")}
-        
-        Other agent's solution:
-        {other_solutions[0]['solution'] if other_solutions else "No other solutions available"}
-        
-        Judge's feedback:
-        {judge_feedback.get('judgment', 'No specific feedback provided')}
-        
-        Specific recommendations:
-        {judge_feedback.get('recommendations', 'No specific recommendations provided')}
-        
-        INSTRUCTIONS:
-        - Reconsider your solution in light of the other agent's approach and the judge's feedback
-        - Focus specifically on areas where you may have made errors or where your approach differs
-        - Provide a revised solution that addresses the feedback
-        - Be explicit about what you're changing and why
-        
-        REVISED SOLUTION:
-        """
+        prompt = f"""Revise your solution to this problem: {problem}
+
+Your previous solution:
+{next((s['solution'] for s in solutions if s['agent_id'] == self.id), "No previous solution found")}
+
+Other solution:
+{other_solutions[0]['solution'] if other_solutions else "No other solutions available"}
+
+Judge's feedback:
+{judge_feedback.get('judgment', 'No specific feedback provided')}
+
+Create an improved solution that addresses the feedback.
+Revised solution:"""
         
         return prompt
     
@@ -397,7 +419,7 @@ class PolyThinkAgentOrchestrator:
         ]
         return await asyncio.gather(*reprompt_tasks)
 
-def create_advanced_polythink_interface():
+def create_polythink_interface():
     orchestrator = PolyThinkAgentOrchestrator()
     
     # State variables to store intermediate results
@@ -405,64 +427,141 @@ def create_advanced_polythink_interface():
     current_solutions = None
     current_judgment = None
     
-    # Step 1: Get solver solutions only
-    def get_solver_solutions(problem):
-        global current_problem, current_solutions
-        
-        # Reset state
-        current_problem = problem
-        current_solutions = None
-        
-        # Get solutions
-        current_solutions = asyncio.run(orchestrator.get_solver_solutions(problem))
-        
-        # Format the initial solutions for display
-        phi2_sol = next((s for s in current_solutions if s['model_name'] == "Phi-2"), None)
-        llama_sol = next((s for s in current_solutions if s['model_name'] == "Llama 3.2 1b"), None)
-        
-        # Return solutions and make judge button visible
-        return [
-            phi2_sol['solution'] if phi2_sol else "Error retrieving solution",
-            llama_sol['solution'] if llama_sol else "Error retrieving solution",
-            phi2_sol['confidence'] if phi2_sol else 0,
-            llama_sol['confidence'] if llama_sol else 0,
-            gr.update(visible=True),  # Show judge button
-            gr.update(value="Waiting for judge evaluation..."),  # Clear judgment text
-            gr.update(value=""),  # Clear winner text
-            gr.update(value="")   # Clear recommendations text
-        ]
-    
-    # Step 2: Get judge evaluation
-    def get_judge_evaluation():
+    # Process problem end-to-end with automatic progression
+    async def process_problem(problem):
         global current_problem, current_solutions, current_judgment
         
-        if not current_problem or not current_solutions:
-            return ["No problem or solutions available", "", "", gr.update(visible=False)]
+        status_updates = []
         
-        # Get judgment
-        current_judgment = asyncio.run(orchestrator.get_judge_evaluation(current_problem, current_solutions))
+        # Step 1: Reset state
+        current_problem = problem
+        current_solutions = None
+        current_judgment = None
         
-        # Check if reprompt is needed
-        reprompt_needed = current_judgment.get('reprompt_needed', False)
+        # Update status
+        status_updates.append("🔍 Analyzing problem...")
+        yield status_updates[-1], "", "", 0, "", "", 0, "", "", gr.update(visible=False)
         
-        return [
-            current_judgment['judgment'],
-            current_judgment.get('winner', "No clear winner"),
-            current_judgment.get('recommendations', "No specific recommendations"),
-            gr.update(visible=reprompt_needed)  # Show reprompt button only if needed
-        ]
+        # Step 2: Get initial solutions
+        status_updates.append("⚙️ Phi-2 and Llama 3.2 are generating solutions...")
+        yield status_updates[-1], "", "", 0, "", "", 0, "", "", gr.update(visible=False)
+        
+        try:
+            current_solutions = await orchestrator.get_solver_solutions(problem)
+            
+            # Format solutions for display
+            phi2_sol = next((s for s in current_solutions if s['model_name'] == "Phi-2"), None)
+            llama_sol = next((s for s in current_solutions if s['model_name'] == "Llama 3.2 1b"), None)
+            
+            phi2_solution = phi2_sol['solution'] if phi2_sol else "Error retrieving solution"
+            llama_solution = llama_sol['solution'] if llama_sol else "Error retrieving solution"
+            phi2_confidence = phi2_sol['confidence'] if phi2_sol else 0
+            llama_confidence = llama_sol['confidence'] if llama_sol else 0
+            
+            status_updates.append("✅ Initial solutions generated!")
+            yield (
+                status_updates[-1], 
+                phi2_solution, phi2_confidence, phi2_sol['specialization'] if phi2_sol else "",
+                llama_solution, llama_confidence, llama_sol['specialization'] if llama_sol else "",
+                "", "", gr.update(visible=False)
+            )
+            
+            # Step 3: Get judge evaluation automatically
+            status_updates.append("⚖️ DeepSeek judge is evaluating solutions...")
+            yield status_updates[-1], phi2_solution, phi2_confidence, phi2_sol['specialization'] if phi2_sol else "", llama_solution, llama_confidence, llama_sol['specialization'] if llama_sol else "", "", "", gr.update(visible=False)
+            
+            current_judgment = await orchestrator.get_judge_evaluation(problem, current_solutions)
+            
+            # Check if reprompt is needed and show button if so
+            reprompt_needed = current_judgment.get('reprompt_needed', False)
+            
+            status_updates.append("✅ Judge evaluation complete!")
+            yield (
+                status_updates[-1],
+                phi2_solution, phi2_confidence, phi2_sol['specialization'] if phi2_sol else "",
+                llama_solution, llama_confidence, llama_sol['specialization'] if llama_sol else "",
+                current_judgment['judgment'],
+                current_judgment.get('winner', "No clear winner"),
+                gr.update(visible=reprompt_needed)
+            )
+            
+            # Step 4: If reprompt is needed, proceed automatically
+            if reprompt_needed:
+                status_updates.append("🔄 Getting revised solutions based on judge feedback...")
+                yield (
+                    status_updates[-1],
+                    phi2_solution, phi2_confidence, phi2_sol['specialization'] if phi2_sol else "",
+                    llama_solution, llama_confidence, llama_sol['specialization'] if llama_sol else "",
+                    current_judgment['judgment'],
+                    current_judgment.get('winner', "No clear winner"),
+                    gr.update(visible=False)
+                )
+                
+                revised_solutions = await orchestrator.get_revised_solutions(
+                    problem, current_solutions, current_judgment
+                )
+                
+                # Update the current solutions with revised ones
+                current_solutions = revised_solutions
+                
+                # Get updated phi2 and llama solutions
+                phi2_sol = next((s for s in current_solutions if s['model_name'] == "Phi-2"), None)
+                llama_sol = next((s for s in current_solutions if s['model_name'] == "Llama 3.2 1b"), None)
+                
+                phi2_solution = phi2_sol['solution'] if phi2_sol else "Error retrieving solution"
+                llama_solution = llama_sol['solution'] if llama_sol else "Error retrieving solution"
+                phi2_confidence = phi2_sol['confidence'] if phi2_sol else 0
+                llama_confidence = llama_sol['confidence'] if llama_sol else 0
+                
+                # Get final judgment
+                current_judgment = await orchestrator.get_judge_evaluation(problem, current_solutions)
+                
+                status_updates.append("✅ Process complete! Final solutions and evaluation are ready.")
+                yield (
+                    "\n".join(status_updates),
+                    phi2_solution, phi2_confidence, phi2_sol['specialization'] if phi2_sol else "",
+                    llama_solution, llama_confidence, llama_sol['specialization'] if llama_sol else "",
+                    current_judgment['judgment'],
+                    current_judgment.get('winner', "No clear winner"),
+                    gr.update(visible=False)
+                )
+            else:
+                status_updates.append("✅ Process complete! Solutions and evaluation are ready.")
+                yield (
+                    "\n".join(status_updates),
+                    phi2_solution, phi2_confidence, phi2_sol['specialization'] if phi2_sol else "",
+                    llama_solution, llama_confidence, llama_sol['specialization'] if llama_sol else "",
+                    current_judgment['judgment'],
+                    current_judgment.get('winner', "No clear winner"),
+                    gr.update(visible=False)
+                )
+                
+        except Exception as e:
+            error_message = f"Error: {str(e)}"
+            status_updates.append(f"❌ {error_message}")
+            yield (
+                "\n".join(status_updates),
+                f"Error: {str(e)}", 0, "",
+                f"Error: {str(e)}", 0, "",
+                f"Error occurred during processing: {str(e)}",
+                "No winner due to error",
+                gr.update(visible=False)
+            )
     
-    # Step 3: Get revised solutions if needed
-    def get_revised_solutions():
+    # Manual reprompt function as a backup
+    async def manual_reprompt():
         global current_problem, current_solutions, current_judgment
         
         if not current_problem or not current_solutions or not current_judgment:
-            return ["No problem, solutions or judgment available", "No solutions available", 0, 0]
+            return "No problem, solutions or judgment available", "", 0, "", "", 0, "", "", ""
+        
+        status_updates = ["🔄 Manually getting revised solutions..."]
+        yield status_updates[-1], "", 0, "", "", 0, "", "", "", gr.update(visible=False)
         
         # Get revised solutions
-        revised_solutions = asyncio.run(orchestrator.get_revised_solutions(
+        revised_solutions = await orchestrator.get_revised_solutions(
             current_problem, current_solutions, current_judgment
-        ))
+        )
         
         # Update the current solutions with revised ones
         current_solutions = revised_solutions
@@ -471,97 +570,172 @@ def create_advanced_polythink_interface():
         phi2_sol = next((s for s in current_solutions if s['model_name'] == "Phi-2"), None)
         llama_sol = next((s for s in current_solutions if s['model_name'] == "Llama 3.2 1b"), None)
         
-        return [
-            phi2_sol['solution'] if phi2_sol else "Error retrieving solution",
-            llama_sol['solution'] if llama_sol else "Error retrieving solution",
-            phi2_sol['confidence'] if phi2_sol else 0,
-            llama_sol['confidence'] if llama_sol else 0
-        ]
+        phi2_solution = phi2_sol['solution'] if phi2_sol else "Error retrieving solution"
+        llama_solution = llama_sol['solution'] if llama_sol else "Error retrieving solution"
+        phi2_confidence = phi2_sol['confidence'] if phi2_sol else 0
+        llama_confidence = llama_sol['confidence'] if llama_sol else 0
+        
+        status_updates.append("⚖️ Getting final judgment...")
+        yield (
+            "\n".join(status_updates),
+            phi2_solution, phi2_confidence, phi2_sol['specialization'] if phi2_sol else "",
+            llama_solution, llama_confidence, llama_sol['specialization'] if llama_sol else "",
+            current_judgment['judgment'],
+            current_judgment.get('winner', "No clear winner"),
+            gr.update(visible=False)
+        )
+        
+        # Get final judgment
+        current_judgment = await orchestrator.get_judge_evaluation(current_problem, current_solutions)
+        
+        status_updates.append("✅ Manual reprompt complete!")
+        yield (
+            "\n".join(status_updates),
+            phi2_solution, phi2_confidence, phi2_sol['specialization'] if phi2_sol else "",
+            llama_solution, llama_confidence, llama_sol['specialization'] if llama_sol else "",
+            current_judgment['judgment'],
+            current_judgment.get('winner', "No clear winner"),
+            gr.update(visible=False)
+        )
+    
+    # Custom CSS
+    custom_css = """
+    .status-bar {
+        background-color: #f0f7ff;
+        border-left: 4px solid #3B82F6;
+        padding: 12px 15px;
+        margin-bottom: 20px;
+        border-radius: 5px;
+        font-family: "Courier New", monospace;
+        white-space: pre-wrap;
+        font-weight: 500;
+    }
+    
+    .agent-container {
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 15px;
+        margin-bottom: 10px;
+        transition: all 0.3s ease;
+    }
+    
+    .agent-container:hover {
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    
+    .agent-header {
+        display: flex;
+        align-items: center;
+        margin-bottom: 10px;
+    }
+    
+    .phi-container {
+        border-left: 4px solid #4F46E5;
+    }
+    
+    .llama-container {
+        border-left: 4px solid #EC4899;
+    }
+    
+    .judge-container {
+        border-left: 4px solid #10B981;
+        background-color: #f8fafc;
+    }
+    
+    .confidence-meter {
+        height: 8px;
+        border-radius: 4px;
+        background-color: #e5e7eb;
+        margin-top: 5px;
+        overflow: hidden;
+    }
+    
+    .confidence-fill {
+        height: 100%;
+        background-color: #4F46E5;
+    }
+    
+    .winner-badge {
+        display: inline-block;
+        background-color: #FBBF24;
+        color: #7C2D12;
+        padding: 3px 8px;
+        border-radius: 4px;
+        font-weight: bold;
+        font-size: 0.8em;
+        margin-left: 10px;
+    }
+    
+    .title-container {
+        background: linear-gradient(90deg, #4F46E5 0%, #EC4899 100%);
+        padding: 20px;
+        border-radius: 10px;
+        margin-bottom: 20px;
+        color: white;
+        text-align: center;
+    }
+    
+    .title-container h1 {
+        margin: 0;
+        font-size: 2.5em;
+    }
+    
+    .title-container p {
+        margin-top: 10px;
+        opacity: 0.9;
+    }
+    """
     
     # Create the interface
-    with gr.Blocks(title="PolyThink Multi-Agent Problem Solver") as demo:
-        gr.Markdown("# PolyThink: Multi-Agent Problem Solving")
-        gr.Markdown("Enter a problem and watch as multiple AI agents collaborate to solve it.")
+    with gr.Blocks(title="PolyThink Multi-Agent Problem Solver", css=custom_css) as demo:
+        # Custom header with gradients
+        gr.HTML("""
+        <div class="title-container">
+            <h1>🧠 PolyThink: Multi-Agent Problem Solving</h1>
+            <p>Watch multiple AI models collaborate to solve problems with a judge model evaluating their answers</p>
+        </div>
+        """)
+        
+        # Status bar at the top (more prominent)
+        status_text = gr.Markdown("Ready to solve problems...", elem_classes=["status-bar"])
         
         with gr.Row():
-            problem_input = gr.Textbox(
-                label="Problem to Solve",
-                placeholder="Enter a problem or question here...",
-                lines=3
-            )
-            solve_button = gr.Button("Solve Problem", variant="primary")
+            with gr.Column(scale=4):
+                problem_input = gr.Textbox(
+                    label="Problem to Solve",
+                    placeholder="Enter a problem or question here. For example: 'What is 5+10?' or 'Explain why the sky is blue in simple terms'",
+                    lines=3
+                )
+            with gr.Column(scale=1):
+                solve_button = gr.Button("Solve Problem", variant="primary", size="lg")
         
         with gr.Row():
             with gr.Column():
-                gr.Markdown("### Phi-2 Solution")
-                phi2_solution = gr.Textbox(label="Solution", lines=10)
+                gr.HTML("""<div class="agent-container phi-container">
+                    <div class="agent-header">
+                        <h3>Phi-2 Solution</h3>
+                        <div class="model-badge" id="phi-specialization"></div>
+                    </div>
+                """)
+                phi2_specialization = gr.Textbox(label="Specialization", elem_id="phi-specialization")
+                phi2_solution = gr.Textbox(label="Solution", lines=5)
                 phi2_confidence = gr.Number(label="Confidence")
+                gr.HTML("</div>")  # Close container
             
             with gr.Column():
-                gr.Markdown("### Llama 3.2 1b Solution")
-                llama_solution = gr.Textbox(label="Solution", lines=10)
+                gr.HTML("""<div class="agent-container llama-container">
+                    <div class="agent-header">
+                        <h3>Llama 3.2 1B Solution</h3>
+                        <div class="model-badge" id="llama-specialization"></div>
+                    </div>
+                """)
+                llama_specialization = gr.Textbox(label="Specialization", elem_id="llama-specialization")
+                llama_solution = gr.Textbox(label="Solution", lines=5)
                 llama_confidence = gr.Number(label="Confidence")
+                gr.HTML("</div>")  # Close container
         
         with gr.Row():
             with gr.Column():
-                gr.Markdown("### Judge Evaluation")
-                judge_button = gr.Button("Get Judge Evaluation", visible=False, variant="secondary")
-                judgment_text = gr.Textbox(label="Judgment", lines=10, value="Judge will evaluate solutions after you click the button above.")
-                winner_text = gr.Textbox(label="Winner")
-                recommendations_text = gr.Textbox(label="Recommendations", lines=3)
-                reprompt_button = gr.Button("Get Revised Solutions", visible=False)
-        
-        # Status indicator
-        status_text = gr.Markdown("### Status: Ready")
-        
-        # Connect the components
-        solve_button.click(
-            fn=lambda: "### Status: Generating solutions from Phi-2 and Llama 3.2...",
-            outputs=[status_text],
-            queue=False
-        ).then(
-            fn=get_solver_solutions,
-            inputs=[problem_input],
-            outputs=[
-                phi2_solution, llama_solution, 
-                phi2_confidence, llama_confidence,
-                judge_button, judgment_text, winner_text, recommendations_text
-            ]
-        ).then(
-            fn=lambda: "### Status: Solutions generated! Click 'Get Judge Evaluation' to continue.",
-            outputs=[status_text],
-            queue=False
-        )
-        
-        judge_button.click(
-            fn=lambda: "### Status: Judge (DeepSeek) is evaluating solutions...",
-            outputs=[status_text],
-            queue=False
-        ).then(
-            fn=get_judge_evaluation,
-            outputs=[judgment_text, winner_text, recommendations_text, reprompt_button]
-        ).then(
-            fn=lambda: "### Status: Judge evaluation complete!",
-            outputs=[status_text],
-            queue=False
-        )
-        
-        reprompt_button.click(
-            fn=lambda: "### Status: Getting revised solutions based on judge feedback...",
-            outputs=[status_text],
-            queue=False
-        ).then(
-            fn=get_revised_solutions,
-            outputs=[phi2_solution, llama_solution, phi2_confidence, llama_confidence]
-        ).then(
-            fn=lambda: "### Status: Revised solutions generated!",
-            outputs=[status_text],
-            queue=False
-        )
-        
-    return demo
-
-# Launch the app
-if __name__ == "__main__":
-    demo = create_advanced_polythink_interface()
-    demo.launch()
+                gr.HTML("""<div class="agent-container judge-container">
+                    <div class="agent-header">
+                        <h3>DeepSeek Judge Evaluation
