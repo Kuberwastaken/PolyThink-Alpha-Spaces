@@ -417,7 +417,7 @@ def create_advanced_polythink_interface():
         margin: 0 auto;
     }
     .status-bar {
-        background-color: #f0f8ff;
+        background-color: #0f0f11;
         border-radius: 10px;
         padding: 15px;
         margin: 10px 0;
