@@ -97,14 +97,13 @@ class PolyThinkAgent:
         inputs = self.tokenizer(prompt, return_tensors="pt").to(DEVICE)
         
         # Adjust generation parameters based on model
-        max_new_tokens = 200  # Limit token generation to prevent verbose responses
-        temperature = 0.7
+        max_new_tokens = 150  # Reduced from 200 to limit verbosity
+        temperature = 0.5  # Lower temperature for more focused responses
         
         if "Llama" in self.model_name:
-            temperature = 0.5  # Lower temperature for more focused responses
-            min_new_tokens = 50  # Ensure Llama provides at least this many tokens
+            min_new_tokens = 20  # Ensure Llama provides at least this many tokens
         else:
-            min_new_tokens = 30  # Ensure Phi-2 provides at least this many tokens
+            min_new_tokens = 20  # Ensure Phi-2 provides at least this many tokens
         
         outputs = self.model.generate(
             **inputs, 
@@ -112,7 +111,8 @@ class PolyThinkAgent:
             min_new_tokens=min_new_tokens,
             num_return_sequences=1,
             temperature=temperature,
-            do_sample=True
+            do_sample=True,
+            top_p=0.9  # Added to focus on more likely tokens
         )
         solution = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
         
@@ -205,36 +205,28 @@ class PolyThinkAgent:
         """
         Create a specialized prompt for solver agents
         """
-        # Different prompts based on model to control verbosity
+        base_prompt = f"""
+        PROBLEM-SOLVING TASK
+        
+        PROBLEM: {problem}
+        
+        SOLUTION GUIDELINES:
+        - Start with the direct answer in one sentence
+        - Provide only essential reasoning (2-3 sentences maximum)
+        - For simple math problems, just show the calculation and result
+        - For complex problems, use brief step-by-step reasoning
+        - Total response should be under 75 words
+        
+        SOLUTION:
+        """
+        
+        # Add model-specific instructions
         if "Llama" in self.model_name:
-            return f"""
-            PROBLEM-SOLVING TASK
-            
-            PROBLEM: {problem}
-            
-            SOLUTION REQUIREMENTS:
-            - Provide a concise, step-by-step solution (maximum 200 words)
-            - Show only essential mathematical reasoning
-            - Explain your approach briefly
-            - Ensure accuracy in your calculations
-            - Avoid repetition and unnecessary elaboration
-            
-            SOLUTION:
-            """
+            # Llama tends to be too brief, encourage slightly more explanation
+            return base_prompt
         else:
-            return f"""
-            PROBLEM-SOLVING TASK
-            
-            PROBLEM: {problem}
-            
-            SOLUTION REQUIREMENTS:
-            - Provide a clear, step-by-step solution (maximum 200 words)
-            - Show your mathematical reasoning in detail
-            - Explain your approach
-            - Ensure accuracy in your calculations
-            
-            SOLUTION:
-            """
+            # Phi tends to be verbose, encourage brevity
+            return base_prompt + "\nIMPORTANT: Be extremely concise. Avoid unnecessary steps or explanations."
     
     def _construct_judge_prompt(self, problem: str, solutions: List[Dict[str, Any]]) -> str:
         """
@@ -413,176 +405,99 @@ def create_advanced_polythink_interface():
     current_solutions = None
     current_judgment = None
     
-    # Step 1: Get solver solutions
-    def get_solutions(problem):
-        global current_problem, current_solutions
+    # Step 1: Get solver solutions, then automatically get judgment
+    def get_solutions_and_judge(problem):
+        global current_problem, current_solutions, current_judgment
+        
+        # Reset state
         current_problem = problem
+        current_solutions = None
+        current_judgment = None
+        
+        # Get solutions
         current_solutions = asyncio.run(orchestrator.get_solver_solutions(problem))
         
-        # Format the results for display
+        # Format the initial solutions for display
         phi2_sol = next((s for s in current_solutions if s['model_name'] == "Phi-2"), None)
         llama_sol = next((s for s in current_solutions if s['model_name'] == "Llama 3.2 1b"), None)
         
+        # Automatically get judgment
+        current_judgment = asyncio.run(orchestrator.get_judge_evaluation(problem, current_solutions))
+        
+        # Check if reprompt is needed
+        reprompt_needed = current_judgment.get('reprompt_needed', False)
+        
+        # If reprompt is needed, automatically get revised solutions
+        if reprompt_needed:
+            revised_solutions = asyncio.run(orchestrator.get_revised_solutions(
+                problem, current_solutions, current_judgment
+            ))
+            
+            # Update the current solutions with revised ones
+            current_solutions = revised_solutions
+            
+            # Get updated phi2 and llama solutions
+            phi2_sol = next((s for s in current_solutions if s['model_name'] == "Phi-2"), None)
+            llama_sol = next((s for s in current_solutions if s['model_name'] == "Llama 3.2 1b"), None)
+        
+        # Return all results
         return [
             phi2_sol['solution'] if phi2_sol else "Error retrieving solution",
             llama_sol['solution'] if llama_sol else "Error retrieving solution",
             phi2_sol['confidence'] if phi2_sol else 0,
             llama_sol['confidence'] if llama_sol else 0,
-            gr.update(visible=True)  # Make judge button visible
-        ]
-    
-    # Step 2: Get judge evaluation
-    def get_judgment():
-        global current_problem, current_solutions, current_judgment
-        
-        if not current_problem or not current_solutions:
-            return ["No problem or solutions available", "N/A", "N/A", gr.update(visible=False)]
-        
-        current_judgment = asyncio.run(orchestrator.get_judge_evaluation(current_problem, current_solutions))
-        
-        reprompt_needed = current_judgment.get('reprompt_needed', False)
-        
-        return [
             current_judgment['judgment'],
             current_judgment.get('winner', "No clear winner"),
             current_judgment.get('recommendations', "No specific recommendations"),
-            gr.update(visible=reprompt_needed)  # Show reprompt button only if needed
+            gr.update(visible=False)  # Hide judge button since it's automatic
         ]
     
-    # Step 3: Get revised solutions if needed
-    def get_revised_solutions():
-        global current_problem, current_solutions, current_judgment
-        
-        if not current_problem or not current_solutions or not current_judgment:
-            return ["No problem, solutions or judgment available", "No solutions available", 0, 0]
-        
-        revised_solutions = asyncio.run(orchestrator.get_revised_solutions(
-            current_problem, current_solutions, current_judgment
-        ))
-        
-        # Update the current solutions with revised ones
-        current_solutions = revised_solutions
-        
-        # Format the results for display
-        phi2_sol = next((s for s in revised_solutions if s['model_name'] == "Phi-2"), None)
-        llama_sol = next((s for s in revised_solutions if s['model_name'] == "Llama 3.2 1b"), None)
-        
-        return [
-            phi2_sol['solution'] if phi2_sol else "Error retrieving revised solution",
-            llama_sol['solution'] if llama_sol else "Error retrieving revised solution",
-            phi2_sol['confidence'] if phi2_sol else 0,
-            llama_sol['confidence'] if llama_sol else 0
-        ]
-    
-    interface = gr.Blocks(theme=gr.themes.Default())
-    
-    with interface:
-        gr.Markdown("# PolyThink: Multi-Agent Problem Solver with Sequential Evaluation")
+    # Create the interface
+    with gr.Blocks(title="PolyThink Multi-Agent Problem Solver") as demo:
+        gr.Markdown("# PolyThink: Multi-Agent Problem Solving")
+        gr.Markdown("Enter a problem and watch as multiple AI agents collaborate to solve it.")
         
         with gr.Row():
             problem_input = gr.Textbox(
-                label="Enter your problem",
-                lines=4,
-                placeholder="Enter your problem or question here..."
+                label="Problem to Solve",
+                placeholder="Enter a problem or question here...",
+                lines=3
             )
-            solve_button = gr.Button("Get Solutions First", variant="primary")
-        
-        with gr.Accordion("Solver Agents", open=True):
-            with gr.Row():
-                phi2_output = gr.Textbox(label="Phi-2 Solution", lines=10, interactive=False)
-                llama_output = gr.Textbox(label="Llama 3.2 1b Solution", lines=10, interactive=False)
-            
-            with gr.Row():
-                phi2_confidence = gr.Slider(
-                    minimum=0, maximum=100,
-                    label="Phi-2 Confidence",
-                    interactive=False
-                )
-                llama_confidence = gr.Slider(
-                    minimum=0, maximum=100,
-                    label="Llama Confidence",
-                    interactive=False
-                )
+            solve_button = gr.Button("Solve Problem")
         
         with gr.Row():
-            judge_button = gr.Button("Evaluate Solutions with DeepSeek", visible=False)
-        
-        with gr.Accordion("Judge Evaluation", open=True):
-            judge_evaluation = gr.Textbox(
-                label="DeepSeek Evaluation", 
-                lines=12, 
-                interactive=False
-            )
+            with gr.Column():
+                gr.Markdown("### Phi-2 Solution")
+                phi2_solution = gr.Textbox(label="Solution", lines=10)
+                phi2_confidence = gr.Number(label="Confidence")
             
-            with gr.Row():
-                winner_display = gr.Textbox(
-                    label="Winning Solution",
-                    interactive=False
-                )
-                
-                recommendations_display = gr.Textbox(
-                    label="Improvement Recommendations",
-                    lines=4,
-                    interactive=False
-                )
+            with gr.Column():
+                gr.Markdown("### Llama 3.2 1b Solution")
+                llama_solution = gr.Textbox(label="Solution", lines=10)
+                llama_confidence = gr.Number(label="Confidence")
         
         with gr.Row():
-            reprompt_button = gr.Button("Reprompt Agents with Judge Feedback", visible=False)
+            with gr.Column():
+                gr.Markdown("### Judge Evaluation")
+                judgment_text = gr.Textbox(label="Judgment", lines=10)
+                winner_text = gr.Textbox(label="Winner")
+                recommendations_text = gr.Textbox(label="Recommendations", lines=3)
         
-        with gr.Accordion("Revised Solutions", open=True, visible=True):
-            with gr.Row():
-                phi2_revised = gr.Textbox(label="Phi-2 Revised Solution", lines=10, interactive=False)
-                llama_revised = gr.Textbox(label="Llama 3.2 Revised Solution", lines=10, interactive=False)
-            
-            with gr.Row():
-                phi2_revised_confidence = gr.Slider(
-                    minimum=0, maximum=100,
-                    label="Phi-2 Revised Confidence",
-                    interactive=False
-                )
-                llama_revised_confidence = gr.Slider(
-                    minimum=0, maximum=100,
-                    label="Llama Revised Confidence",
-                    interactive=False
-                )
-        
-        # Connect the buttons to their respective functions
+        # Connect the components
         solve_button.click(
-            get_solutions,
-            inputs=problem_input,
+            fn=get_solutions_and_judge,
+            inputs=[problem_input],
             outputs=[
-                phi2_output,
-                llama_output,
-                phi2_confidence,
-                llama_confidence,
-                judge_button
+                phi2_solution, llama_solution, 
+                phi2_confidence, llama_confidence,
+                judgment_text, winner_text, recommendations_text,
+                solve_button  # This is just a placeholder, we'll update visibility
             ]
         )
         
-        judge_button.click(
-            get_judgment,
-            inputs=[],
-            outputs=[
-                judge_evaluation,
-                winner_display,
-                recommendations_display,
-                reprompt_button
-            ]
-        )
-        
-        reprompt_button.click(
-            get_revised_solutions,
-            inputs=[],
-            outputs=[
-                phi2_revised,
-                llama_revised,
-                phi2_revised_confidence,
-                llama_revised_confidence
-            ]
-        )
-    
-    return interface
+    return demo
 
+# Launch the app
 if __name__ == "__main__":
-    interface = create_advanced_polythink_interface()
-    interface.launch(debug=True)
+    demo = create_advanced_polythink_interface()
+    demo.launch()
