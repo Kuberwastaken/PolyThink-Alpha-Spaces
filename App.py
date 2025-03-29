@@ -50,7 +50,7 @@ class PolyThinkAgent:
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_path,
                 token=self.hf_token,
-                torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32,
+                torch_dtype=torch.float16,
                 device_map="auto"
             )
             
