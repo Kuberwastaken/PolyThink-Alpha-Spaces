@@ -424,6 +424,7 @@ def create_advanced_polythink_interface():
         border-left: 5px solid #4682b4;
         font-size: 18px;
         font-weight: bold;
+        text-align: center; /* Center the text in the status bar */
     }
     .round-indicator {
         background-color: #e6f7ff;
@@ -442,7 +443,7 @@ def create_advanced_polythink_interface():
         border-radius: 8px;
         padding: 15px;
         margin-bottom: 15px;
-        background-color: #fafafa;
+        background-color: #0f0f11;
         transition: all 0.3s;
     }
     .solution-card:hover {
