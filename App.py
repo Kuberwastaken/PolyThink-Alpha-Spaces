@@ -417,13 +417,15 @@ def create_advanced_polythink_interface():
         margin: 0 auto;
     }
     .status-bar {
-        background-color: #27272a;
+        background-color: #0f0f11;
         border-radius: 10px;
         padding: 15px;
-        margin: 10px 0;
+        margin: 10px auto;
         border-left: 5px solid #4682b4;
         font-size: 18px;
         font-weight: bold;
+        text-align: center;
+        width: 80%;
     }
     .round-indicator {
         background-color: #e6f7ff;
