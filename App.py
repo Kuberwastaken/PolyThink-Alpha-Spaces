@@ -57,7 +57,7 @@ class PolyThinkAgent:
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_path,
                 token=self.hf_token,
-                torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32,
+                torch_dtype=torch.float16,
                 device_map="auto"
             )
             
@@ -95,11 +95,19 @@ class PolyThinkAgent:
         
         # Generate solution
         inputs = self.tokenizer(prompt, return_tensors="pt").to(DEVICE)
+        
+        # Adjust generation parameters based on model
+        max_length = 512  # Shorter max length to prevent verbose responses
+        temperature = 0.7
+        
+        if "Llama" in self.model_name:
+            temperature = 0.5  # Lower temperature for more focused responses
+        
         outputs = self.model.generate(
             **inputs, 
-            max_length=1024, 
+            max_length=max_length, 
             num_return_sequences=1,
-            temperature=0.7,
+            temperature=temperature,
             do_sample=True
         )
         solution = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
@@ -193,19 +201,36 @@ class PolyThinkAgent:
         """
         Create a specialized prompt for solver agents
         """
-        return f"""
-        PROBLEM-SOLVING TASK
-        
-        PROBLEM: {problem}
-        
-        SOLUTION REQUIREMENTS:
-        - Provide a clear, step-by-step solution
-        - Show your mathematical reasoning in detail
-        - Explain your approach
-        - Ensure accuracy in your calculations
-        
-        SOLUTION:
-        """
+        # Different prompts based on model to control verbosity
+        if "Llama" in self.model_name:
+            return f"""
+            PROBLEM-SOLVING TASK
+            
+            PROBLEM: {problem}
+            
+            SOLUTION REQUIREMENTS:
+            - Provide a concise, step-by-step solution (maximum 200 words)
+            - Show only essential mathematical reasoning
+            - Explain your approach briefly
+            - Ensure accuracy in your calculations
+            - Avoid repetition and unnecessary elaboration
+            
+            SOLUTION:
+            """
+        else:
+            return f"""
+            PROBLEM-SOLVING TASK
+            
+            PROBLEM: {problem}
+            
+            SOLUTION REQUIREMENTS:
+            - Provide a clear, step-by-step solution (maximum 200 words)
+            - Show your mathematical reasoning in detail
+            - Explain your approach
+            - Ensure accuracy in your calculations
+            
+            SOLUTION:
+            """
     
     def _construct_judge_prompt(self, problem: str, solutions: List[Dict[str, Any]]) -> str:
         """
