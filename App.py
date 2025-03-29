@@ -287,8 +287,8 @@ def create_advanced_polythink_interface():
         return "Process ongoing..."
 
     css = """
-    .status { background-color: #e6f3ff; padding: 15px; border-radius: 8px; margin-bottom: 20px; font-weight: bold; border: 1px solid #007bff; }
-    .solution-box { border: 1px solid #ddd; padding: 10px; border-radius: 5px; background-color: #fafafa; }
+    .status { background-color: #0f0f11; padding: 15px; border-radius: 8px; margin-bottom: 20px; font-weight: bold; border: 1px solid #007bff; }
+    .solution-box { border: 1px solid #ddd; padding: 10px; border-radius: 5px; background-color: #0f0f11; }
     .button-primary { background-color: #007bff; color: white; }
     """
 
