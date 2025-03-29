@@ -54,16 +54,14 @@ class PolyThinkAgent:
             temperature=0.5,
             do_sample=True,
             top_p=0.9,
-            repetition_penalty=1.2  # Added to reduce repetition in Llama
+            repetition_penalty=1.2
         )
         solution = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
         solution_text = solution.split("SOLUTION:")[1].strip() if "SOLUTION:" in solution else solution.strip()
-        # Clean up Phi-2 output
         if "IMPORTANT" in solution_text:
             solution_text = solution_text.split("IMPORTANT")[0].strip()
-        # Limit Llama repetition
         solution_lines = solution_text.split("\n")
-        solution_text = "\n".join(sorted(set(solution_lines), key=solution_lines.index))[:3]  # Keep first 3 unique lines
+        solution_text = "\n".join(sorted(set(solution_lines), key=solution_lines.index))[:3]
         return {
             "agent_id": self.id,
             "model_name": self.model_name,
@@ -72,28 +70,39 @@ class PolyThinkAgent:
             "confidence": self._calculate_confidence(solution_text)
         }
 
-    async def evaluate_solutions(self, problem: str, solutions: List[Dict[str, Any]], final_pass: bool = False) -> Dict[str, Any]:
+    async def evaluate_solutions(self, problem: str, solutions: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not solutions:
-            return {"judgment": "No solutions provided", "recommendations": "", "winner": None, "reprompt_needed": False}
-        prompt = self._construct_judge_prompt(problem, solutions, final_pass)
+            return {"judgment": "No solutions provided", "comparative_prompt": "", "winner": None}
+        prompt = self._construct_judge_prompt(problem, solutions)
         inputs = self.tokenizer(prompt, return_tensors="pt").to(DEVICE)
         outputs = self.model.generate(**inputs, max_length=1500, num_return_sequences=1, temperature=0.3)
         judgment = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        return self._parse_judgment(judgment, solutions)
+        return self._parse_initial_judgment(judgment, problem, solutions)
 
-    async def reprompt_with_context(self, problem: str, solutions: List[Dict[str, Any]], judge_feedback: Dict[str, Any]) -> Dict[str, Any]:
-        prompt = self._construct_reprompt(problem, solutions, judge_feedback)
+    async def evaluate_opinions(self, problem: str, solutions: List[Dict[str, Any]], opinions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        prompt = self._construct_final_judge_prompt(problem, solutions, opinions)
         inputs = self.tokenizer(prompt, return_tensors="pt").to(DEVICE)
-        outputs = self.model.generate(**inputs, max_length=1000, num_return_sequences=1, temperature=0.5)
-        solution = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        revised = solution.split("REVISED SOLUTION:")[1].strip() if "REVISED SOLUTION:" in solution else solution.strip()
+        outputs = self.model.generate(**inputs, max_length=1500, num_return_sequences=1, temperature=0.3)
+        judgment = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        return self._parse_final_judgment(judgment, solutions)
+
+    async def provide_opinion(self, comparative_prompt: str) -> Dict[str, Any]:
+        inputs = self.tokenizer(comparative_prompt, return_tensors="pt").to(DEVICE)
+        outputs = self.model.generate(
+            **inputs,
+            max_new_tokens=150,
+            num_return_sequences=1,
+            temperature=0.5,
+            do_sample=True,
+            top_p=0.9
+        )
+        opinion = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        opinion_text = opinion.split("OPINION:")[1].strip() if "OPINION:" in opinion else opinion.strip()
         return {
             "agent_id": self.id,
             "model_name": self.model_name,
-            "specialization": self.specialization,
-            "solution": revised,
-            "is_revised": True,
-            "confidence": self._calculate_confidence(revised) * 1.2
+            "opinion": opinion_text,
+            "confidence": self._calculate_confidence(opinion_text)
         }
 
     def _construct_solver_prompt(self, problem: str) -> str:
@@ -112,76 +121,86 @@ class PolyThinkAgent:
             return base_prompt + "\nIMPORTANT: Be concise, exclude unnecessary text."
         return base_prompt
 
-    def _construct_judge_prompt(self, problem: str, solutions: List[Dict[str, Any]], final_pass: bool) -> str:
+    def _construct_judge_prompt(self, problem: str, solutions: List[Dict[str, Any]]) -> str:
         prompt = f"""
         SOLUTION EVALUATION TASK
         PROBLEM: {problem}
-        You are evaluating solutions. Review carefully.
+        You are evaluating solutions.
         SOLUTIONS:
         """
         for i, sol in enumerate(solutions):
             prompt += f"SOLUTION {i+1} from {sol['model_name']} ({sol['specialization']}):\n{sol['solution']}\n\n"
-        if not final_pass:
-            prompt += """
-            YOUR EVALUATION:
-            1. COMPARATIVE ANALYSIS:
-            - Correctness: Compare accuracy
-            - Clarity: Assess explanation clarity
-            - Completeness: Check problem coverage
-            2. STRENGTHS AND WEAKNESSES:
-            - Solution 1: Strengths, Weaknesses
-            - Solution 2: Strengths, Weaknesses
-            3. INITIAL OPINION: Which is better (Phi-2 or Llama 3.2) and why
-            4. REPROMPT NEEDED: YES/NO
-            5. RECOMMENDATIONS: If YES, specify improvements
-            """
-        else:
-            prompt += f"""
-            FINAL EVALUATION:
-            Which is better for "{problem}"?
-            - Phi-2: {solutions[0]['solution']}
-            - Llama 3.2: {solutions[1]['solution']}
-            Give reasons and name the winner (Phi-2 or Llama 3.2).
-            FINAL ANSWER:
-            """
+        prompt += """
+        YOUR EVALUATION:
+        1. COMPARATIVE ANALYSIS:
+        - Correctness: Compare accuracy
+        - Clarity: Assess explanation clarity
+        - Completeness: Check problem coverage
+        2. STRENGTHS AND WEAKNESSES:
+        - Solution 1: Strengths, Weaknesses
+        - Solution 2: Strengths, Weaknesses
+        3. COMPARATIVE PROMPT: Write a prompt like:
+           "What do you think is a better solution to [problem]?
+            [Solution 1]
+            [Solution 2]
+            Give reasoning."
+        """
         return prompt
 
-    def _construct_reprompt(self, problem: str, solutions: List[Dict[str, Any]], judge_feedback: Dict[str, Any]) -> str:
-        other_solutions = [s for s in solutions if s['agent_id'] != self.id]
-        return f"""
-        PROBLEM RE-EVALUATION
+    def _construct_final_judge_prompt(self, problem: str, solutions: List[Dict[str, Any]], opinions: List[Dict[str, Any]]) -> str:
+        prompt = f"""
+        FINAL EVALUATION TASK
         PROBLEM: {problem}
-        Your solution: {next((s['solution'] for s in solutions if s['agent_id'] == self.id), "N/A")}
-        Other solution: {other_solutions[0]['solution'] if other_solutions else "N/A"}
-        Judge feedback: {judge_feedback.get('judgment', 'N/A')}
-        Recommendations: {judge_feedback.get('recommendations', 'N/A')}
-        INSTRUCTIONS:
-        - Revise based on feedback and other solution
-        - Address errors or differences
-        - Be concise
-        REVISED SOLUTION:
+        SOLUTIONS:
         """
+        for i, sol in enumerate(solutions):
+            prompt += f"SOLUTION {i+1} from {sol['model_name']}:\n{sol['solution']}\n\n"
+        prompt += "OPINIONS:\n"
+        for i, op in enumerate(opinions):
+            prompt += f"OPINION {i+1} from {op['model_name']}:\n{op['opinion']}\n\n"
+        prompt += """
+        INSTRUCTIONS:
+        1. Review solutions and opinions
+        2. Determine which solution is better based on:
+           - Original solutions' quality
+           - Strength of reasoning in opinions
+        3. Name the winner (Phi-2 or Llama 3.2)
+        FINAL JUDGMENT:
+        """
+        return prompt
 
-    def _parse_judgment(self, judgment_text: str, solutions: List[Dict[str, Any]]) -> Dict[str, Any]:
-        parsed = {"judgment": judgment_text, "recommendations": "", "winner": None, "reprompt_needed": False}
+    def _parse_initial_judgment(self, judgment_text: str, problem: str, solutions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        parsed = {"judgment": judgment_text, "comparative_prompt": "", "winner": None}
+        if "COMPARATIVE PROMPT:" in judgment_text:
+            prompt_section = judgment_text.split("COMPARATIVE PROMPT:")[1].strip()
+            parsed["comparative_prompt"] = prompt_section
+        else:
+            # Default comparative prompt if not explicitly provided
+            parsed["comparative_prompt"] = f"""
+            What do you think is a better solution to "{problem}"?
+            {solutions[0]['model_name']}: {solutions[0]['solution']}
+            {solutions[1]['model_name']}: {solutions[1]['solution']}
+            Give reasoning.
+            OPINION:
+            """
+        return parsed
+
+    def _parse_final_judgment(self, judgment_text: str, solutions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        parsed = {"judgment": judgment_text, "winner": None}
         if "WINNER:" in judgment_text:
             winner_section = judgment_text.split("WINNER:")[1].split("\n")[0].strip()
             for sol in solutions:
                 if sol['model_name'].lower() in winner_section.lower():
                     parsed["winner"] = sol['model_name']
-        if "REPROMPT NEEDED: YES" in judgment_text.upper():
-            parsed["reprompt_needed"] = True
-        if "RECOMMENDATIONS:" in judgment_text:
-            parsed["recommendations"] = judgment_text.split("RECOMMENDATIONS:")[1].strip()
-        if not parsed["winner"] and "FINAL ANSWER:" in judgment_text:
-            final_section = judgment_text.split("FINAL ANSWER:")[1].strip()
+        elif "FINAL JUDGMENT:" in judgment_text:
+            final_section = judgment_text.split("FINAL JUDGMENT:")[1].strip()
             for sol in solutions:
                 if sol['model_name'].lower() in final_section.lower():
                     parsed["winner"] = sol['model_name']
         return parsed
 
-    def _calculate_confidence(self, solution: str) -> float:
-        word_count = len(solution.split())
+    def _calculate_confidence(self, text: str) -> float:
+        word_count = len(text.split())
         return min(word_count / 100, 1.0) * 100
 
 class PolyThinkAgentOrchestrator:
@@ -195,17 +214,21 @@ class PolyThinkAgentOrchestrator:
     async def get_solver_solutions(self, problem: str) -> List[Dict[str, Any]]:
         return await asyncio.gather(*[agent.solve_problem(problem) for agent in self.solver_agents])
 
-    async def get_judge_evaluation(self, problem: str, solutions: List[Dict[str, Any]], final_pass: bool = False) -> Dict[str, Any]:
-        return await self.judge_agent.evaluate_solutions(problem, solutions, final_pass)
+    async def get_initial_judge_evaluation(self, problem: str, solutions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return await self.judge_agent.evaluate_solutions(problem, solutions)
 
-    async def get_revised_solutions(self, problem: str, solutions: List[Dict[str, Any]], judgment: Dict[str, Any]) -> List[Dict[str, Any]]:
-        return await asyncio.gather(*[agent.reprompt_with_context(problem, solutions, judgment) for agent in self.solver_agents])
+    async def get_solver_opinions(self, comparative_prompt: str) -> List[Dict[str, Any]]:
+        return await asyncio.gather(*[agent.provide_opinion(comparative_prompt) for agent in self.solver_agents])
+
+    async def get_final_judge_evaluation(self, problem: str, solutions: List[Dict[str, Any]], opinions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return await self.judge_agent.evaluate_opinions(problem, solutions, opinions)
 
 def create_advanced_polythink_interface():
     orchestrator = PolyThinkAgentOrchestrator()
     current_problem = None
     current_solutions = None
-    current_judgment = None
+    current_initial_judgment = None
+    current_opinions = None
     current_final_judgment = None
 
     def get_solver_solutions(problem):
@@ -221,52 +244,45 @@ def create_advanced_polythink_interface():
             llama_sol['confidence'] if llama_sol else 0
         ]
 
-    def get_judge_evaluation_initial():
-        nonlocal current_problem, current_solutions, current_judgment
+    def get_initial_judge_evaluation():
+        nonlocal current_problem, current_solutions, current_initial_judgment
         if not current_problem or not current_solutions:
-            return ["No data", "", "", gr.update(visible=False)]
-        current_judgment = asyncio.run(orchestrator.get_judge_evaluation(current_problem, current_solutions, final_pass=False))
-        return [
-            current_judgment['judgment'],
-            current_judgment.get('winner', "Pending final evaluation"),
-            current_judgment.get('recommendations', "N/A"),
-            gr.update(visible=current_judgment.get('reprompt_needed', False))
-        ]
+            return ["No data", ""]
+        current_initial_judgment = asyncio.run(orchestrator.get_initial_judge_evaluation(current_problem, current_solutions))
+        return [current_initial_judgment['judgment'], current_initial_judgment['comparative_prompt']]
 
-    def get_judge_evaluation_final():
-        nonlocal current_problem, current_solutions, current_final_judgment
-        current_final_judgment = asyncio.run(orchestrator.get_judge_evaluation(current_problem, current_solutions, final_pass=True))
-        return [
-            current_final_judgment['judgment'],
-            current_final_judgment.get('winner', "No clear winner"),
-            current_final_judgment.get('recommendations', "N/A"),
-            gr.update(visible=False)  # Hide reprompt button after final judgment
-        ]
-
-    def get_revised_solutions():
-        nonlocal current_problem, current_solutions, current_judgment
-        if not current_problem or not current_solutions or not current_judgment:
+    def get_solver_opinions():
+        nonlocal current_initial_judgment, current_opinions
+        if not current_initial_judgment or not current_initial_judgment.get('comparative_prompt'):
             return ["No data", "No data", 0, 0]
-        current_solutions = asyncio.run(orchestrator.get_revised_solutions(current_problem, current_solutions, current_judgment))
-        phi2_sol = next((s for s in current_solutions if s['model_name'] == "Phi-2"), None)
-        llama_sol = next((s for s in current_solutions if s['model_name'] == "Llama 3.2 1b"), None)
+        current_opinions = asyncio.run(orchestrator.get_solver_opinions(current_initial_judgment['comparative_prompt']))
+        phi2_op = next((o for o in current_opinions if o['model_name'] == "Phi-2"), None)
+        llama_op = next((o for o in current_opinions if o['model_name'] == "Llama 3.2 1b"), None)
         return [
-            phi2_sol['solution'] if phi2_sol else "Error",
-            llama_sol['solution'] if llama_sol else "Error",
-            phi2_sol['confidence'] if phi2_sol else 0,
-            llama_sol['confidence'] if llama_sol else 0
+            phi2_op['opinion'] if phi2_op else "Error",
+            llama_op['opinion'] if llama_op else "Error",
+            phi2_op['confidence'] if phi2_op else 0,
+            llama_op['confidence'] if llama_op else 0
         ]
+
+    def get_final_judge_evaluation():
+        nonlocal current_problem, current_solutions, current_opinions, current_final_judgment
+        if not current_problem or not current_solutions or not current_opinions:
+            return ["No data", "No clear winner"]
+        current_final_judgment = asyncio.run(orchestrator.get_final_judge_evaluation(current_problem, current_solutions, current_opinions))
+        return [current_final_judgment['judgment'], current_final_judgment.get('winner', "No clear winner")]
 
     def generate_final_report():
-        if current_final_judgment and not current_judgment.get('reprompt_needed', False):
+        if current_final_judgment:
             report = f"## Final Report\n\n**Problem:** {current_problem}\n\n"
             for sol in current_solutions:
                 report += f"### {sol['model_name']} Solution\n{sol['solution']}\n\n"
-            report += f"### Initial Judge Evaluation\n{current_judgment['judgment']}\n\n"
+            report += f"### Initial Judge Evaluation\n{current_initial_judgment['judgment']}\n\n"
+            report += f"### Comparative Prompt\n{current_initial_judgment['comparative_prompt']}\n\n"
+            for op in current_opinions:
+                report += f"### {op['model_name']} Opinion\n{op['opinion']}\n\n"
             report += f"### Final Judge Evaluation\n{current_final_judgment['judgment']}\n\n"
             report += f"### Winner: {current_final_judgment['winner']}\n\n"
-            if 'recommendations' in current_judgment:
-                report += f"### Recommendations\n{current_judgment['recommendations']}\n\n"
             return report
         return "Process ongoing..."
 
@@ -279,7 +295,7 @@ def create_advanced_polythink_interface():
     with gr.Blocks(css=css, title="PolyThink Multi-Agent Problem Solver") as demo:
         status_text = gr.Markdown("### 🔄 Status: Ready", elem_classes=["status"])
         gr.Markdown("# PolyThink: Multi-Agent Problem Solving")
-        gr.Markdown("Enter a problem and let AI agents solve it collaboratively!")
+        gr.Markdown("Enter a problem and let AI agents solve and evaluate collaboratively!")
 
         with gr.Row():
             problem_input = gr.Textbox(label="Problem to Solve", placeholder="E.g., What is 5+10?", lines=3)
@@ -297,11 +313,25 @@ def create_advanced_polythink_interface():
 
         with gr.Row():
             with gr.Column():
-                gr.Markdown("### Judge Evaluation")
-                judgment_text = gr.Textbox(label="Judgment", lines=10, elem_classes=["solution-box"])
+                gr.Markdown("### Initial Judge Evaluation")
+                initial_judgment_text = gr.Textbox(label="Judgment", lines=5, elem_classes=["solution-box"])
+                comparative_prompt_text = gr.Textbox(label="Comparative Prompt", lines=5, elem_classes=["solution-box"])
+
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### Phi-2 Opinion")
+                phi2_opinion = gr.Textbox(label="Opinion", lines=5, elem_classes=["solution-box"])
+                phi2_op_confidence = gr.Number(label="Confidence")
+            with gr.Column():
+                gr.Markdown("### Llama 3.2 Opinion")
+                llama_opinion = gr.Textbox(label="Opinion", lines=5, elem_classes=["solution-box"])
+                llama_op_confidence = gr.Number(label="Confidence")
+
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### Final Judge Evaluation")
+                final_judgment_text = gr.Textbox(label="Judgment", lines=5, elem_classes=["solution-box"])
                 winner_text = gr.Textbox(label="Winner")
-                recommendations_text = gr.Textbox(label="Recommendations", lines=3)
-                reprompt_button = gr.Button("Get Revised Solutions", visible=False)
 
         final_report = gr.Markdown("### 📜 Final Report\n\nWaiting for completion...")
 
@@ -316,37 +346,20 @@ def create_advanced_polythink_interface():
             fn=lambda: gr.update(value="### ⚖️ Status: Initial judge evaluation...", elem_classes=["status"]),
             outputs=[status_text]
         ).then(
-            fn=get_judge_evaluation_initial,
-            outputs=[judgment_text, winner_text, recommendations_text, reprompt_button]
+            fn=get_initial_judge_evaluation,
+            outputs=[initial_judgment_text, comparative_prompt_text]
+        ).then(
+            fn=lambda: gr.update(value="### 🔄 Status: Gathering solver opinions...", elem_classes=["status"]),
+            outputs=[status_text]
+        ).then(
+            fn=get_solver_opinions,
+            outputs=[phi2_opinion, llama_opinion, phi2_op_confidence, llama_op_confidence]
         ).then(
             fn=lambda: gr.update(value="### ⚖️ Status: Final judge evaluation...", elem_classes=["status"]),
             outputs=[status_text]
         ).then(
-            fn=get_judge_evaluation_final,
-            outputs=[judgment_text, winner_text, recommendations_text, reprompt_button]
-        ).then(
-            fn=generate_final_report,
-            outputs=[final_report]
-        ).then(
-            fn=lambda: gr.update(value="### ✅ Status: Process complete!", elem_classes=["status"]),
-            outputs=[status_text]
-        )
-
-        reprompt_button.click(
-            fn=lambda: gr.update(value="### 🔄 Status: Getting revised solutions...", elem_classes=["status"]),
-            outputs=[status_text]
-        ).then(
-            fn=get_revised_solutions,
-            outputs=[phi2_solution, llama_solution, phi2_confidence, llama_confidence]
-        ).then(
-            fn=lambda: gr.update(value="### ⚖️ Status: Re-evaluating with judge...", elem_classes=["status"]),
-            outputs=[status_text]
-        ).then(
-            fn=get_judge_evaluation_initial,
-            outputs=[judgment_text, winner_text, recommendations_text, reprompt_button]
-        ).then(
-            fn=get_judge_evaluation_final,
-            outputs=[judgment_text, winner_text, recommendations_text, reprompt_button]
+            fn=get_final_judge_evaluation,
+            outputs=[final_judgment_text, winner_text]
         ).then(
             fn=generate_final_report,
             outputs=[final_report]
