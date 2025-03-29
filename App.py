@@ -31,6 +31,7 @@ class PolyThinkAgent:
         self.id = str(uuid.uuid4())
         self.model_name = model_name
         self.role = role
+        self.model_path = model_path
         
         # Get HF token from environment
         self.hf_token = os.getenv("HF_TOKEN")
@@ -85,20 +86,11 @@ class PolyThinkAgent:
         }
         return specialization_map.get(self.model_name, "General Problem Solver")
     
-    async def solve_problem(self, problem: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
+    async def solve_problem(self, problem: str) -> Dict[str, Any]:
         """
-        Asynchronous problem-solving method for solver agents
+        Generate a solution to a problem
         """
-        if self.role == "solver":
-            return await self._generate_solution(problem, context)
-        else:
-            return await self._judge_solutions(problem, context)
-    
-    async def _generate_solution(self, problem: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
-        """
-        Generate a solution for solver agents
-        """
-        # Construct specialized prompt
+        # Construct solver prompt
         prompt = self._construct_solver_prompt(problem)
         
         # Generate solution
@@ -114,31 +106,34 @@ class PolyThinkAgent:
         
         # Extract the actual solution part
         if "SOLUTION:" in solution:
-            solution = solution.split("SOLUTION:")[1].strip()
+            solution_text = solution.split("SOLUTION:")[1].strip()
+        else:
+            solution_text = solution.strip()
         
         return {
             "agent_id": self.id,
             "model_name": self.model_name,
             "specialization": self.specialization,
-            "solution": solution,
-            "confidence": self._calculate_confidence(solution)
+            "solution": solution_text,
+            "confidence": self._calculate_confidence(solution_text)
         }
     
-    async def _judge_solutions(self, problem: str, context: Dict[str, Any]) -> Dict[str, Any]:
+    async def evaluate_solutions(self, problem: str, solutions: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        Judge existing solutions for judge agents
+        Evaluate existing solutions and determine a winner
         """
-        if not context or 'solutions' not in context or len(context['solutions']) == 0:
+        if not solutions or len(solutions) == 0:
             return {
                 "agent_id": self.id,
                 "model_name": self.model_name,
                 "specialization": self.specialization,
                 "judgment": "No solutions provided to evaluate",
                 "recommendations": "Please provide solutions to evaluate",
-                "confidence": 0
+                "winner": None,
+                "reprompt_needed": False
             }
         
-        prompt = self._construct_judge_prompt(problem, context['solutions'])
+        prompt = self._construct_judge_prompt(problem, solutions)
         
         # Generate judgment
         inputs = self.tokenizer(prompt, return_tensors="pt").to(DEVICE)
@@ -151,7 +146,7 @@ class PolyThinkAgent:
         judgment = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
         
         # Extract relevant parts if possible
-        judgment_dict = self._parse_judgment(judgment, context['solutions'])
+        judgment_dict = self._parse_judgment(judgment, solutions)
         
         return {
             "agent_id": self.id,
@@ -160,7 +155,38 @@ class PolyThinkAgent:
             "judgment": judgment_dict["judgment"],
             "recommendations": judgment_dict["recommendations"],
             "winner": judgment_dict["winner"],
-            "confidence": 90.0  # Fixed high confidence for judge
+            "reprompt_needed": judgment_dict["reprompt_needed"]
+        }
+    
+    async def reprompt_with_context(self, problem: str, solutions: List[Dict[str, Any]], judge_feedback: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Re-solve a problem with knowledge of other solutions and judge feedback
+        """
+        prompt = self._construct_reprompt(problem, solutions, judge_feedback)
+        
+        # Generate revised solution
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(DEVICE)
+        outputs = self.model.generate(
+            **inputs, 
+            max_length=1500, 
+            num_return_sequences=1,
+            temperature=0.5
+        )
+        solution = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        
+        # Extract the revised solution part
+        if "REVISED SOLUTION:" in solution:
+            revised = solution.split("REVISED SOLUTION:")[1].strip()
+        else:
+            revised = solution.strip()
+        
+        return {
+            "agent_id": self.id,
+            "model_name": self.model_name,
+            "specialization": self.specialization,
+            "solution": revised,
+            "is_revised": True,
+            "confidence": self._calculate_confidence(revised) * 1.2  # Slightly boost confidence for revised solution
         }
     
     def _construct_solver_prompt(self, problem: str) -> str:
@@ -174,9 +200,9 @@ class PolyThinkAgent:
         
         SOLUTION REQUIREMENTS:
         - Provide a clear, step-by-step solution
-        - Show your reasoning
-        - Explain alternative approaches if relevant
-        - Ensure mathematical accuracy
+        - Show your mathematical reasoning in detail
+        - Explain your approach
+        - Ensure accuracy in your calculations
         
         SOLUTION:
         """
@@ -206,10 +232,46 @@ class PolyThinkAgent:
         EVALUATION INSTRUCTIONS:
         1. Analyze each solution for correctness, clarity, and completeness
         2. Identify the strengths and weaknesses of each approach
-        3. Select the best solution and explain your reasoning
-        4. If neither solution is satisfactory, explain why and recommend improvements
+        3. Select the best solution and explicitly name the winner (Phi-2 or Llama 3.2)
+        4. Determine if the solutions significantly disagree on the core answer. If they do, mark "REPROMPT: YES"
+        5. If reprompt is needed, explain specifically what the agents should focus on in their revised solutions
         
         YOUR EVALUATION:
+        """
+        
+        return prompt
+    
+    def _construct_reprompt(self, problem: str, solutions: List[Dict[str, Any]], judge_feedback: Dict[str, Any]) -> str:
+        """
+        Create a reprompt that includes other solutions and judge feedback
+        """
+        # Find other solutions (not from this agent)
+        other_solutions = [s for s in solutions if s['agent_id'] != self.id]
+        
+        prompt = f"""
+        PROBLEM RE-EVALUATION TASK
+        
+        PROBLEM: {problem}
+        
+        Your previous solution:
+        {next((s['solution'] for s in solutions if s['agent_id'] == self.id), "No previous solution found")}
+        
+        Other agent's solution:
+        {other_solutions[0]['solution'] if other_solutions else "No other solutions available"}
+        
+        Judge's feedback:
+        {judge_feedback.get('judgment', 'No specific feedback provided')}
+        
+        Specific recommendations:
+        {judge_feedback.get('recommendations', 'No specific recommendations provided')}
+        
+        INSTRUCTIONS:
+        - Reconsider your solution in light of the other agent's approach and the judge's feedback
+        - Focus specifically on areas where you may have made errors or where your approach differs
+        - Provide a revised solution that addresses the feedback
+        - Be explicit about what you're changing and why
+        
+        REVISED SOLUTION:
         """
         
         return prompt
@@ -222,10 +284,11 @@ class PolyThinkAgent:
         parsed = {
             "judgment": judgment_text,
             "recommendations": "",
-            "winner": ""
+            "winner": None,
+            "reprompt_needed": False
         }
         
-        # Try to extract structured information if available
+        # Check for explicit winner indication
         if "WINNER:" in judgment_text:
             winner_section = judgment_text.split("WINNER:")[1].split("\n")[0].strip()
             for sol in solutions:
@@ -233,24 +296,36 @@ class PolyThinkAgent:
                     parsed["winner"] = sol['model_name']
                     break
         
+        # Check for explicit reprompt need
+        if "REPROMPT: YES" in judgment_text.upper() or "REPROMPT:YES" in judgment_text.upper():
+            parsed["reprompt_needed"] = True
+            
+        # Extract recommendations if available
         if "RECOMMENDATIONS:" in judgment_text:
             parsed["recommendations"] = judgment_text.split("RECOMMENDATIONS:")[1].strip()
         
         # If no winner was explicitly mentioned but one solution is clearly favored
         if not parsed["winner"] and len(solutions) > 0:
-            # Count mentions of each model name in a positive context
+            # Simple heuristic: check for positive mentions
             mentions = {sol['model_name']: 0 for sol in solutions}
-            for sol in solutions:
-                if f"correct" in judgment_text.lower() and sol['model_name'].lower() in judgment_text.lower():
-                    mentions[sol['model_name']] += 5
-                if f"best" in judgment_text.lower() and sol['model_name'].lower() in judgment_text.lower():
-                    mentions[sol['model_name']] += 5
-                if f"preferred" in judgment_text.lower() and sol['model_name'].lower() in judgment_text.lower():
-                    mentions[sol['model_name']] += 3
             
-            # Get the most mentioned model
+            # Look for positive associations
+            positive_terms = ["correct", "best", "accurate", "prefer", "better", "winner"]
+            for sol in solutions:
+                for term in positive_terms:
+                    if term in judgment_text.lower() and sol['model_name'].lower() in judgment_text.lower():
+                        mentions[sol['model_name']] += 1
+            
+            # Get the most mentioned model if any
             if any(mentions.values()):
                 parsed["winner"] = max(mentions, key=mentions.get)
+        
+        # If solutions have significantly different answers, we might need a reprompt
+        if not parsed["reprompt_needed"] and len(solutions) >= 2:
+            # Check if judge mentions disagreement or errors
+            disagreement_terms = ["disagree", "conflict", "different", "contradictory", "error", "mistake"]
+            if any(term in judgment_text.lower() for term in disagreement_terms):
+                parsed["reprompt_needed"] = True
         
         return parsed
     
@@ -278,34 +353,102 @@ class PolyThinkAgentOrchestrator:
             role="judge"
         )
     
-    async def solve_problem_multi_agent(self, problem: str) -> Dict[str, Any]:
+    async def get_solver_solutions(self, problem: str) -> List[Dict[str, Any]]:
         """
-        Parallel problem-solving with solvers followed by judgment
+        Get solutions from all solver agents in parallel
         """
-        # Step 1: Get solutions from solver agents
         solver_tasks = [agent.solve_problem(problem) for agent in self.solver_agents]
-        solutions = await asyncio.gather(*solver_tasks)
-        
-        # Step 2: Judge the solutions
-        judge_context = {"solutions": solutions}
-        judgment = await self.judge_agent.solve_problem(problem, judge_context)
-        
-        return {
-            "problem": problem,
-            "solver_solutions": solutions,
-            "judgment": judgment
-        }
+        return await asyncio.gather(*solver_tasks)
+    
+    async def get_judge_evaluation(self, problem: str, solutions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Get evaluation from judge agent
+        """
+        return await self.judge_agent.evaluate_solutions(problem, solutions)
+    
+    async def get_revised_solutions(self, problem: str, solutions: List[Dict[str, Any]], judgment: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Get revised solutions from solver agents based on judgment
+        """
+        reprompt_tasks = [
+            agent.reprompt_with_context(problem, solutions, judgment) 
+            for agent in self.solver_agents
+        ]
+        return await asyncio.gather(*reprompt_tasks)
 
 def create_advanced_polythink_interface():
     orchestrator = PolyThinkAgentOrchestrator()
     
-    def solve_problem(problem):
-        return asyncio.run(orchestrator.solve_problem_multi_agent(problem))
+    # State variables to store intermediate results
+    current_problem = None
+    current_solutions = None
+    current_judgment = None
+    
+    # Step 1: Get solver solutions
+    def get_solutions(problem):
+        global current_problem, current_solutions
+        current_problem = problem
+        current_solutions = asyncio.run(orchestrator.get_solver_solutions(problem))
+        
+        # Format the results for display
+        phi2_sol = next((s for s in current_solutions if s['model_name'] == "Phi-2"), None)
+        llama_sol = next((s for s in current_solutions if s['model_name'] == "Llama 3.2 1b"), None)
+        
+        return [
+            phi2_sol['solution'] if phi2_sol else "Error retrieving solution",
+            llama_sol['solution'] if llama_sol else "Error retrieving solution",
+            phi2_sol['confidence'] if phi2_sol else 0,
+            llama_sol['confidence'] if llama_sol else 0,
+            gr.update(visible=True)  # Make judge button visible
+        ]
+    
+    # Step 2: Get judge evaluation
+    def get_judgment():
+        global current_problem, current_solutions, current_judgment
+        
+        if not current_problem or not current_solutions:
+            return ["No problem or solutions available", "N/A", "N/A", gr.update(visible=False)]
+        
+        current_judgment = asyncio.run(orchestrator.get_judge_evaluation(current_problem, current_solutions))
+        
+        reprompt_needed = current_judgment.get('reprompt_needed', False)
+        
+        return [
+            current_judgment['judgment'],
+            current_judgment.get('winner', "No clear winner"),
+            current_judgment.get('recommendations', "No specific recommendations"),
+            gr.update(visible=reprompt_needed)  # Show reprompt button only if needed
+        ]
+    
+    # Step 3: Get revised solutions if needed
+    def get_revised_solutions():
+        global current_problem, current_solutions, current_judgment
+        
+        if not current_problem or not current_solutions or not current_judgment:
+            return ["No problem, solutions or judgment available", "No solutions available", 0, 0]
+        
+        revised_solutions = asyncio.run(orchestrator.get_revised_solutions(
+            current_problem, current_solutions, current_judgment
+        ))
+        
+        # Update the current solutions with revised ones
+        current_solutions = revised_solutions
+        
+        # Format the results for display
+        phi2_sol = next((s for s in revised_solutions if s['model_name'] == "Phi-2"), None)
+        llama_sol = next((s for s in revised_solutions if s['model_name'] == "Llama 3.2 1b"), None)
+        
+        return [
+            phi2_sol['solution'] if phi2_sol else "Error retrieving revised solution",
+            llama_sol['solution'] if llama_sol else "Error retrieving revised solution",
+            phi2_sol['confidence'] if phi2_sol else 0,
+            llama_sol['confidence'] if llama_sol else 0
+        ]
     
     interface = gr.Blocks(theme=gr.themes.Default())
     
     with interface:
-        gr.Markdown("# PolyThink: Multi-Agent Problem Solver with Judgment")
+        gr.Markdown("# PolyThink: Multi-Agent Problem Solver with Sequential Evaluation")
         
         with gr.Row():
             problem_input = gr.Textbox(
@@ -313,12 +456,27 @@ def create_advanced_polythink_interface():
                 lines=4,
                 placeholder="Enter your problem or question here..."
             )
-            solve_button = gr.Button("Solve with Multiple Agents", variant="primary")
+            solve_button = gr.Button("Get Solutions First", variant="primary")
         
         with gr.Accordion("Solver Agents", open=True):
             with gr.Row():
                 phi2_output = gr.Textbox(label="Phi-2 Solution", lines=10, interactive=False)
                 llama_output = gr.Textbox(label="Llama 3.2 1b Solution", lines=10, interactive=False)
+            
+            with gr.Row():
+                phi2_confidence = gr.Slider(
+                    minimum=0, maximum=100,
+                    label="Phi-2 Confidence",
+                    interactive=False
+                )
+                llama_confidence = gr.Slider(
+                    minimum=0, maximum=100,
+                    label="Llama Confidence",
+                    interactive=False
+                )
+        
+        with gr.Row():
+            judge_button = gr.Button("Evaluate Solutions with DeepSeek", visible=False)
         
         with gr.Accordion("Judge Evaluation", open=True):
             judge_evaluation = gr.Textbox(
@@ -339,56 +497,58 @@ def create_advanced_polythink_interface():
                     interactive=False
                 )
         
-        with gr.Accordion("Confidence Metrics", open=False):
+        with gr.Row():
+            reprompt_button = gr.Button("Reprompt Agents with Judge Feedback", visible=False)
+        
+        with gr.Accordion("Revised Solutions", open=True, visible=True):
             with gr.Row():
-                phi2_confidence = gr.Slider(
+                phi2_revised = gr.Textbox(label="Phi-2 Revised Solution", lines=10, interactive=False)
+                llama_revised = gr.Textbox(label="Llama 3.2 Revised Solution", lines=10, interactive=False)
+            
+            with gr.Row():
+                phi2_revised_confidence = gr.Slider(
                     minimum=0, maximum=100,
-                    label="Phi-2 Confidence",
+                    label="Phi-2 Revised Confidence",
                     interactive=False
                 )
-                llama_confidence = gr.Slider(
+                llama_revised_confidence = gr.Slider(
                     minimum=0, maximum=100,
-                    label="Llama Confidence",
+                    label="Llama Revised Confidence",
                     interactive=False
                 )
         
-        with gr.Accordion("Advanced Features", open=False):
-            reprompt_button = gr.Button("Reprompt Agents with Judge Feedback")
-            
-            detailed_reasoning = gr.Textbox(
-                label="Detailed Reasoning",
-                lines=3,
-                interactive=False
-            )
-        
-        def process_problem(problem):
-            result = solve_problem(problem)
-            
-            phi2_sol = next((s for s in result['solver_solutions'] if s['model_name'] == "Phi-2"), None)
-            llama_sol = next((s for s in result['solver_solutions'] if s['model_name'] == "Llama 3.2 1b"), None)
-            judgment = result['judgment']
-            
-            return [
-                phi2_sol['solution'] if phi2_sol else "Error retrieving solution",
-                llama_sol['solution'] if llama_sol else "Error retrieving solution",
-                judgment['judgment'],
-                judgment.get('winner', 'No clear winner'),
-                judgment.get('recommendations', 'No specific recommendations'),
-                phi2_sol['confidence'] if phi2_sol else 0,
-                llama_sol['confidence'] if llama_sol else 0
-            ]
-        
+        # Connect the buttons to their respective functions
         solve_button.click(
-            process_problem,
+            get_solutions,
             inputs=problem_input,
             outputs=[
                 phi2_output,
                 llama_output,
+                phi2_confidence,
+                llama_confidence,
+                judge_button
+            ]
+        )
+        
+        judge_button.click(
+            get_judgment,
+            inputs=[],
+            outputs=[
                 judge_evaluation,
                 winner_display,
                 recommendations_display,
-                phi2_confidence,
-                llama_confidence
+                reprompt_button
+            ]
+        )
+        
+        reprompt_button.click(
+            get_revised_solutions,
+            inputs=[],
+            outputs=[
+                phi2_revised,
+                llama_revised,
+                phi2_revised_confidence,
+                llama_revised_confidence
             ]
         )
     
