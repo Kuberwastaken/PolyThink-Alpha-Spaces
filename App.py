@@ -97,15 +97,19 @@ class PolyThinkAgent:
         inputs = self.tokenizer(prompt, return_tensors="pt").to(DEVICE)
         
         # Adjust generation parameters based on model
-        max_length = 512  # Shorter max length to prevent verbose responses
+        max_new_tokens = 200  # Limit token generation to prevent verbose responses
         temperature = 0.7
         
         if "Llama" in self.model_name:
             temperature = 0.5  # Lower temperature for more focused responses
+            min_new_tokens = 50  # Ensure Llama provides at least this many tokens
+        else:
+            min_new_tokens = 30  # Ensure Phi-2 provides at least this many tokens
         
         outputs = self.model.generate(
             **inputs, 
-            max_length=max_length, 
+            max_new_tokens=max_new_tokens,
+            min_new_tokens=min_new_tokens,
             num_return_sequences=1,
             temperature=temperature,
             do_sample=True
